@@ -8,7 +8,7 @@
 
 这是一个基于 Model Context Protocol (MCP) 的服务器，用于访问 Elsevier Scopus API。它允许 AI 助手（如 Claude）搜索学术论文、获取摘要以及查找作者资料。
 
-**请注意，申请Elsevier Scopus API一般要求您的组织或机构购买了Elsevier的数据库服务，并且您的设备必须具有uv开发环境**
+**请注意，申请 Elsevier Scopus API 一般要求您的组织或机构订阅了 Elsevier 数据库服务。此外，要通过零配置方式运行此工具，您的设备必须安装 `uv` 包管理器。**
 
 ## 配置方法
 
