@@ -5,8 +5,11 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Union
 
 class CacheManager:
-    def __init__(self, cache_dir: Union[str, Path] = ".cache", expiration_seconds: int = 86400):
-        self.cache_dir = Path(cache_dir).resolve()
+    def __init__(self, cache_dir: Union[str, Path] = None, expiration_seconds: int = 86400):
+        if cache_dir is None:
+            self.cache_dir = Path.home() / ".cache" / "scopus-mcp"
+        else:
+            self.cache_dir = Path(cache_dir).resolve()
         self.expiration_seconds = expiration_seconds
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
