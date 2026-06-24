@@ -7,7 +7,14 @@ from mcp.server.stdio import stdio_server
 import mcp.types as types
 
 from .client import ScopusClient
-from .utils import clean_search_results, clean_abstract_details, clean_author_profile
+from .utils import (
+    clean_search_results,
+    clean_abstract_details,
+    clean_author_profile,
+    clean_identifiers,
+    clean_references,
+    detect_id_type,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -106,6 +113,53 @@ async def handle_list_tools() -> list[types.Tool]:
                 "properties": {},
                 "required": []
             }
+        ),
+        types.Tool(
+            name="resolve_identifier",
+            description=(
+                "Resolve any document identifier (Scopus ID, EID, DOI, or PII) to "
+                "the full cross-reference set (scopus_id, eid, doi, pii, title). "
+                "Use this to obtain a DOI for cross-linking with OpenAlex/Crossref, "
+                "or to normalize an ID before calling other tools."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "identifier": {
+                        "type": "string",
+                        "description": "The identifier value (e.g. '0031512927', '2-s2.0-0031512927', or a DOI)."
+                    },
+                    "id_type": {
+                        "type": "string",
+                        "description": "Optional override of the identifier type.",
+                        "enum": ["scopus_id", "eid", "doi", "pii"]
+                    }
+                },
+                "required": ["identifier"]
+            }
+        ),
+        types.Tool(
+            name="get_references",
+            description=(
+                "Retrieve the cited-reference list of a document (Backward Citations) "
+                "via the Abstract Retrieval REF view. Complements get_citing_papers, "
+                "which returns forward citations. Requires an entitled (subscriber) key."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "scopus_id": {
+                        "type": "string",
+                        "description": "The Scopus ID (or EID) of the document whose references to retrieve."
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Maximum number of references to return (default 25).",
+                        "default": 25
+                    }
+                },
+                "required": ["scopus_id"]
+            }
         )
     ]
 
@@ -121,34 +175,34 @@ async def handle_call_tool(
             query = arguments.get("query")
             count = arguments.get("count", 5)
             sort = arguments.get("sort", "coverDate")
-
+            
             if not query:
                 raise ValueError("Query is required")
 
             # Await the async client method
             raw_data = await client.search_scopus(query, count=count, sort=sort)
             results = clean_search_results(raw_data)
-
+            
             return [types.TextContent(type="text", text=str(results))]
 
         elif name == "get_abstract_details":
             scopus_id = arguments.get("scopus_id")
             if not scopus_id:
                 raise ValueError("scopus_id is required")
-
+                
             raw_data = await client.get_abstract(scopus_id)
             details = clean_abstract_details(raw_data)
-
+            
             return [types.TextContent(type="text", text=str(details))]
 
         elif name == "get_author_profile":
             author_id = arguments.get("author_id")
             if not author_id:
                 raise ValueError("author_id is required")
-
+                
             raw_data = await client.get_author(author_id)
             profile = clean_author_profile(raw_data)
-
+            
             return [types.TextContent(type="text", text=str(profile))]
 
         elif name == "get_citing_papers":
@@ -159,23 +213,48 @@ async def handle_call_tool(
             if not scopus_id:
                 raise ValueError("scopus_id is required")
 
-            # Forward citations: find documents whose reference list contains
-            # this document's EID. Scopus needs REF(<eid>) in the 2-s2.0 form.
-            # REFEID(<bare id>) returns HTTP 400.
-            clean_id = scopus_id.replace('SCOPUS_ID:', '').replace('2-s2.0-', '').strip()
-            eid = f"2-s2.0-{clean_id}"
-            query = f"REF({eid})"
-
-            raw_data = await client.search_scopus(query, count=count, sort=sort)
+            # Forward citations via centralized REF(2-s2.0-<id>) construction.
+            raw_data = await client.get_citing_papers(scopus_id, count=count, sort=sort)
             results = clean_search_results(raw_data)
 
             return [types.TextContent(type="text", text=str(results))]
+
+        elif name == "resolve_identifier":
+            identifier = arguments.get("identifier")
+            if not identifier:
+                raise ValueError("identifier is required")
+
+            id_type = arguments.get("id_type") or detect_id_type(identifier)
+            raw_data = await client.get_abstract_by(identifier, id_type=id_type)
+            ids = clean_identifiers(raw_data)
+            if not ids:
+                return [types.TextContent(
+                    type="text",
+                    text=f"No record found for {identifier!r} (resolved as id_type={id_type})."
+                )]
+            return [types.TextContent(type="text", text=str(ids))]
+
+        elif name == "get_references":
+            scopus_id = arguments.get("scopus_id")
+            count = arguments.get("count", 25)
+            if not scopus_id:
+                raise ValueError("scopus_id is required")
+
+            raw_data = await client.get_references(scopus_id)
+            references = clean_references(raw_data, limit=count)
+            if not references:
+                return [types.TextContent(
+                    type="text",
+                    text=("No references returned. The document may have no indexed "
+                          "references, or your API key may lack REF-view entitlement.")
+                )]
+            return [types.TextContent(type="text", text=str(references))]
 
         elif name == "get_quota_status":
             quota = await client.get_quota_status()
             if not quota:
                 return [types.TextContent(type="text", text="No quota information available yet. Please make a request to initialize.")]
-
+            
             return [types.TextContent(type="text", text=str(quota))]
 
         else:

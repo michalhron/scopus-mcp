@@ -6,6 +6,7 @@ from urllib.parse import urljoin
 
 from .config import get_api_key, get_cache_config
 from .cache import CacheManager
+from .utils import to_scopus_id, to_eid
 
 # Setup basic logging
 logging.basicConfig(level=logging.INFO)
@@ -106,7 +107,19 @@ class ScopusClient:
                     logger.info(f"Resource not found: {url}")
                     return {} 
                 else:
-                    raise e
+                    # Surface the response body and the query so malformed-syntax
+                    # 400s (bad REF()/field syntax) are distinguishable from
+                    # entitlement 403s without guesswork.
+                    body = ''
+                    try:
+                        body = e.response.text[:500]
+                    except Exception:
+                        pass
+                    q = params.get('query') if params else None
+                    raise Exception(
+                        f"Scopus API error {status} for {url} "
+                        f"(query={q!r}): {body}"
+                    ) from e
             except httpx.RequestError as e:
                 logger.warning(f"Request failed: {e}. Retrying...")
                 await asyncio.sleep(backoff)
@@ -156,3 +169,51 @@ class ScopusClient:
         """
         clean_id = author_id.replace('AUTHOR_ID:', '')
         return await self._request('GET', f'content/author/author_id/{clean_id}', ttl=self.cache_config['author'])
+
+    async def get_abstract_by(self, value: str, id_type: str = 'scopus_id') -> Dict[str, Any]:
+        """
+        Retrieves an abstract record by any supported identifier type.
+        Endpoint: content/abstract/{id_type}/{value}
+
+        id_type is one of: 'scopus_id', 'eid', 'doi', 'pii'.
+        Used by resolve_identifier to cross-reference IDs (Scopus ID / EID / DOI).
+        """
+        id_type = (id_type or 'scopus_id').lower()
+        if id_type == 'scopus_id':
+            endpoint = f"content/abstract/scopus_id/{to_scopus_id(value)}"
+        elif id_type == 'eid':
+            endpoint = f"content/abstract/eid/{str(value).strip()}"
+        elif id_type == 'doi':
+            endpoint = f"content/abstract/doi/{str(value).strip()}"
+        elif id_type == 'pii':
+            endpoint = f"content/abstract/pii/{str(value).strip()}"
+        else:
+            raise ValueError(f"Unsupported id_type: {id_type}")
+        return await self._request('GET', endpoint, ttl=self.cache_config['abstract'])
+
+    async def get_references(self, scopus_id: str) -> Dict[str, Any]:
+        """
+        Retrieves the cited-reference list (backward citations) for a document
+        via the Abstract Retrieval REF view.
+        Endpoint: content/abstract/scopus_id/{id}?view=REF
+
+        Note: the REF view requires an entitled (subscriber) key; an
+        unentitled key returns 403, surfaced as an error by _request.
+        Deeper paging of long reference lists uses the 'startref' parameter.
+        """
+        params = {'view': 'REF'}
+        return await self._request(
+            'GET',
+            f"content/abstract/scopus_id/{to_scopus_id(scopus_id)}",
+            params,
+            ttl=self.cache_config['abstract'],
+        )
+
+    async def get_citing_papers(self, scopus_id: str, count: int = 25, start: int = 0, sort: str = 'coverDate') -> Dict[str, Any]:
+        """
+        Retrieves forward citations via a Search API REF() query.
+        Builds REF(2-s2.0-<id>) using the centralized EID normalization,
+        which the Search API accepts (the bare-id REFEID(<id>) form 400s).
+        """
+        query = f"REF({to_eid(scopus_id)})"
+        return await self.search_scopus(query, count=count, start=start, sort=sort)

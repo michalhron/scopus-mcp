@@ -119,3 +119,147 @@ def _extract_affiliation(profile: Dict[str, Any]) -> Optional[str]:
         affil = affil[0] if affil else {}
         
     return affil.get('ip-doc', {}).get('afdispname')
+
+
+# ---------------------------------------------------------------------------
+# Identifier normalization helpers
+# ---------------------------------------------------------------------------
+# Scopus exposes the same document under several identifiers. The Search API's
+# REF() field expects the EID form (2-s2.0-<id>), while the Abstract Retrieval
+# endpoints key on the bare Scopus ID. Centralizing the conversion here keeps
+# every tool consistent and prevents the REFEID/REF class of bug.
+
+def to_scopus_id(value: str) -> str:
+    """Return the bare numeric Scopus ID, stripping a SCOPUS_ID: prefix or
+    2-s2.0- EID prefix if present."""
+    clean = str(value).strip().replace('SCOPUS_ID:', '')
+    if clean.lower().startswith('2-s2.0-'):
+        clean = clean[len('2-s2.0-'):]
+    return clean
+
+
+def to_eid(value: str) -> str:
+    """Return the EID form (2-s2.0-<id>) used by the Search API's REF() field."""
+    return f'2-s2.0-{to_scopus_id(value)}'
+
+
+def detect_id_type(value: str) -> str:
+    """Best-effort detection of an identifier's type.
+
+    Returns one of: 'eid', 'doi', 'pii', 'scopus_id'. Callers may override.
+    """
+    v = str(value).strip()
+    if v.lower().startswith('2-s2.0-'):
+        return 'eid'
+    if v.startswith('10.') or '/' in v:
+        return 'doi'
+    bare = v.replace('SCOPUS_ID:', '')
+    if bare.isdigit():
+        return 'scopus_id'
+    # PII is 17 chars, alphanumeric, often starting with S or B. Loose heuristic.
+    if bare and bare[0] in ('S', 'B') and bare.replace('-', '').isalnum():
+        return 'pii'
+    return 'scopus_id'
+
+
+def clean_identifiers(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract the cross-reference identifier set from an Abstract Retrieval
+    response. This is the join layer for cross-linking with OpenAlex/Crossref,
+    which key on DOI."""
+    root = data.get('abstracts-retrieval-response') or data.get('abstract-retrieval-response')
+    if not root:
+        return {}
+
+    core = root.get('coredata', {})
+    sid = core.get('dc:identifier', '').replace('SCOPUS_ID:', '')
+    eid = core.get('eid') or (f'2-s2.0-{sid}' if sid else None)
+
+    return {
+        'scopus_id': sid or None,
+        'eid': eid,
+        'doi': core.get('prism:doi'),
+        'pii': core.get('pii'),
+        'pubmed_id': core.get('pubmed-id'),
+        'title': core.get('dc:title'),
+        'publication_name': core.get('prism:publicationName'),
+        'cover_date': core.get('prism:coverDate'),
+        'cited_by_count': core.get('citedby-count'),
+    }
+
+
+def clean_references(data: Dict[str, Any], limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Extract the cited-reference list (backward citations) from an Abstract
+    Retrieval REF-view response.
+
+    The REF view's shape varies across records, so this digs through the two
+    common locations and degrades gracefully to whatever fields are present.
+    """
+    root = data.get('abstracts-retrieval-response') or data.get('abstract-retrieval-response')
+    if not root:
+        return []
+
+    refs = None
+    if isinstance(root.get('references'), dict):
+        refs = root['references'].get('reference')
+    if refs is None:
+        # Fallback: references nested in the bibrecord tail
+        try:
+            refs = root['item']['bibrecord']['tail']['bibliography']['reference']
+        except (KeyError, TypeError):
+            refs = None
+    if refs is None:
+        return []
+    if isinstance(refs, dict):
+        refs = [refs]
+
+    cleaned: List[Dict[str, Any]] = []
+    for r in refs:
+        info = r.get('ref-info', r) if isinstance(r, dict) else {}
+
+        title = None
+        rt = info.get('ref-title')
+        if isinstance(rt, dict):
+            title = rt.get('ref-titletext')
+
+        year = None
+        pub = info.get('ref-publicationyear')
+        if isinstance(pub, dict):
+            year = pub.get('@first')
+
+        scopus_id = None
+        doi = None
+        idlist = info.get('refd-itemidlist', {})
+        items = idlist.get('itemid') if isinstance(idlist, dict) else None
+        if isinstance(items, dict):
+            items = [items]
+        for it in (items or []):
+            idtype = (it.get('@idtype') or '').upper()
+            val = it.get('$') or it.get('#text') or it.get('value')
+            if idtype in ('SGR', 'SCP', 'SCOPUS'):
+                scopus_id = val
+            elif idtype == 'DOI':
+                doi = val
+
+        authors: List[str] = []
+        ra = info.get('ref-authors', {})
+        alist = ra.get('author') if isinstance(ra, dict) else None
+        if isinstance(alist, dict):
+            alist = [alist]
+        for a in (alist or []):
+            if isinstance(a, dict):
+                authors.append(a.get('ce:indexed-name') or a.get('ce:surname'))
+
+        cleaned.append({
+            'position': r.get('@id') if isinstance(r, dict) else None,
+            'title': title,
+            'authors': [x for x in authors if x],
+            'source': info.get('ref-sourcetitle'),
+            'year': year,
+            'scopus_id': scopus_id,
+            'doi': doi,
+            'fulltext': info.get('ref-fulltext'),
+        })
+
+    if limit is not None:
+        return cleaned[:limit]
+    return cleaned
