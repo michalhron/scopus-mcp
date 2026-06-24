@@ -107,10 +107,14 @@ def _make_search_raw(items):
 
 
 def _read_corpus(text: str) -> list:
-    """Extract corpus JSON path from summary text and read it."""
+    """Extract corpus JSON path from summary text and read the records list."""
     path_line = next(l for l in text.splitlines() if 'Corpus written to:' in l)
     json_path = path_line.split(':', 1)[1].strip()
-    return json.loads(Path(json_path).read_text())
+    data = json.loads(Path(json_path).read_text())
+    # Corpus is now a dict with a 'records' key
+    if isinstance(data, list):
+        return data
+    return data.get('records', [])
 
 
 # ---------------------------------------------------------------------------
