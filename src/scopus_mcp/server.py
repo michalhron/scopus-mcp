@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -22,6 +22,12 @@ from .utils import (
     write_graph_to_disk,
     _make_node_label,
     write_lineage_to_disk,
+    compute_main_path,
+    render_lineage_html,
+    render_lineage_png,
+    _query_slug,
+    fetch_oa_fulltext,
+    write_fulltext_to_disk,
 )
 
 # Configure logging
@@ -255,6 +261,34 @@ async def handle_list_tools() -> list[types.Tool]:
                     }
                 },
                 "required": ["scopus_id"]
+            }
+        ),
+        types.Tool(
+            name="get_fulltext",
+            description=(
+                "Retrieve the full text of a paper via a provider waterfall: "
+                "(1) ScienceDirect full text (requires SCOPUS_INSTTOKEN or institutional IP), "
+                "(2) open-access copy via OpenAlex + direct fetch, "
+                "(3) Scopus abstract fallback. "
+                "Returns provenance, character count, file path, and a ~1500-char sample. "
+                "Full body is written to disk — never returned inline. "
+                "ToS note: retrieval is for the user's own non-commercial text-and-data-mining; "
+                "content written to local disk must not be redistributed."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "doi": {
+                        "type": "string",
+                        "description": "The DOI of the paper (e.g. '10.1016/j.infoandorg.2026.100608')."
+                    },
+                    "prefer": {
+                        "type": "string",
+                        "description": "Skip straight to a tier for testing: 'sciencedirect', 'oa', 'abstract'.",
+                        "enum": ["sciencedirect", "oa", "abstract"]
+                    }
+                },
+                "required": ["doi"]
             }
         ),
         types.Tool(
@@ -679,19 +713,25 @@ async def handle_call_tool(
                         })
                     return result
 
+            fetch_attempts = 0
+            fetch_errors: list = []  # list of (parent_id, error_message)
+
             for gen in range(1, generations + 1):
                 next_to_expand = []
                 for parent_id in to_expand:
                     if not parent_id:
                         continue
+                    fetch_attempts += 1
                     try:
                         papers = await _fetch_next(parent_id)
                         api_calls += 1
                     except Exception as exc:
+                        err_msg = str(exc)
                         logger.warning(
                             f"citation_lineage ({direction}): fetch failed for "
-                            f"{parent_id}: {exc}"
+                            f"{parent_id}: {err_msg}"
                         )
+                        fetch_errors.append((parent_id, err_msg))
                         continue
 
                     for p in papers:
@@ -731,7 +771,25 @@ async def handle_call_tool(
                     break
 
             records_list = list(all_papers.values())
-            json_path = write_lineage_to_disk(records_list, seed_id)
+
+            # Main-path analysis (SPC)
+            mp_result = compute_main_path(records_list)
+            main_path_ids = mp_result['main_path']
+            spc_edges = mp_result['edges']
+
+            # Consistent base filename for all three output files
+            from datetime import datetime
+            _ts = datetime.now().strftime('%Y%m%dT%H%M%S')
+            _slug = _query_slug(f'lineage-{seed_id}')
+            base_fname = f'scopus-{_slug}-{_ts}'
+
+            json_path = write_lineage_to_disk(
+                records_list, seed_id,
+                main_path=main_path_ids, spc_edges=spc_edges,
+                base_filename=base_fname,
+            )
+            html_path = render_lineage_html(records_list, main_path_ids, seed_id, base_fname)
+            png_path = render_lineage_png(records_list, main_path_ids, seed_id, base_fname)
 
             non_seed = [r for r in records_list if r['generation'] > 0]
             top10 = sorted(
@@ -746,26 +804,143 @@ async def handle_call_tool(
                 if g > 0
             )
 
-            text = (
-                f"Citation lineage ({direction}) for {seed_id} "
-                f"({seed_paper.get('title', seed_id)!r}).\n"
-                f"Generations walked: {generations}. "
-                f"Papers per generation: {gen_summary or 'none (no papers found)'}.\n"
-                f"Total unique papers (excl. seed): {len(non_seed)}. "
-                f"API calls: {api_calls}.\n"
-                f"Corpus written to: {json_path}\n\n"
-                f"Top 10 most-cited papers in lineage:\n"
+            # Main-path labels: first-author surname + year if available
+            mp_labels = []
+            for nid in main_path_ids:
+                rec = all_papers.get(nid, {})
+                mp_labels.append(_make_node_label(rec, nid))
+
+            all_fetches_failed = (
+                fetch_attempts > 0
+                and len(fetch_errors) == fetch_attempts
             )
-            for r in top10:
-                text += (
-                    f"  [gen {r['generation']}] {r.get('title', r['scopus_id'])!r} "
-                    f"({r.get('year', '?')}, {r.get('venue', '?')}) "
-                    f"— {r.get('cited_by_count', '?')} citations\n"
+            some_fetches_failed = fetch_errors and not all_fetches_failed
+
+            if all_fetches_failed:
+                # Don't report "no papers found" — report the real cause.
+                first_err = fetch_errors[0][1]
+                text = (
+                    f"Citation lineage ({direction}) for {seed_id} "
+                    f"({seed_paper.get('title', seed_id)!r}).\n"
+                    f"Walk FAILED: all {len(fetch_errors)} node fetch(es) returned API errors.\n"
+                    f"API calls: {api_calls}.\n"
+                    f"Error: {first_err}\n"
                 )
-            if not top10:
-                text += "  (no papers found)\n"
+                if len(fetch_errors) > 1:
+                    text += f"(and {len(fetch_errors) - 1} more failures)\n"
+            else:
+                text = (
+                    f"Citation lineage ({direction}) for {seed_id} "
+                    f"({seed_paper.get('title', seed_id)!r}).\n"
+                    f"Generations walked: {generations}. "
+                    f"Papers per generation: {gen_summary or 'none (no papers found)'}.\n"
+                    f"Total unique papers (excl. seed): {len(non_seed)}. "
+                    f"API calls: {api_calls}.\n"
+                    f"Corpus written to: {json_path}\n"
+                )
+                if html_path:
+                    text += f"Interactive HTML: {html_path}\n"
+                if png_path:
+                    text += f"PNG: {png_path}\n"
+                if main_path_ids:
+                    text += (
+                        f"Main path ({len(main_path_ids)} nodes): "
+                        + " → ".join(mp_labels) + "\n"
+                    )
+                elif mp_result.get('note'):
+                    text += f"Main path: {mp_result['note']}\n"
+
+                text += "\nTop 10 most-cited papers in lineage:\n"
+                for r in top10:
+                    text += (
+                        f"  [gen {r['generation']}] {r.get('title', r['scopus_id'])!r} "
+                        f"({r.get('year', '?')}, {r.get('venue', '?')}) "
+                        f"— {r.get('cited_by_count', '?')} citations\n"
+                    )
+                if not top10:
+                    text += "  (no papers found)\n"
+
+            if some_fetches_failed:
+                text += (
+                    f"\nWarning: {len(fetch_errors)} node fetch(es) failed with API errors "
+                    f"(partial walk — results may be incomplete). "
+                    f"First error: {fetch_errors[0][1]}\n"
+                )
 
             return [types.TextContent(type="text", text=text)]
+
+        elif name == "get_fulltext":
+            doi = (arguments.get("doi") or "").strip()
+            if not doi:
+                raise ValueError("doi is required")
+            prefer = arguments.get("prefer")  # None → full waterfall
+
+            text_body: Optional[str] = None
+            provenance: str = "none"
+            source_url: Optional[str] = None
+
+            # ── Tier 1: ScienceDirect ────────────────────────────────────────
+            if prefer in (None, "sciencedirect"):
+                try:
+                    sd_data = await client.get_sciencedirect_fulltext(doi)
+                    if sd_data:
+                        root = sd_data.get('full-text-retrieval-response') or {}
+                        candidate = (root.get('originalText') or '').strip()
+                        if len(candidate) > 500:
+                            text_body = candidate
+                            provenance = "sciencedirect-fulltext"
+                except Exception as exc:
+                    logger.warning(f"get_fulltext: SD tier error for doi={doi}: {exc}")
+
+            # ── Tier 2: Open-access ──────────────────────────────────────────
+            if text_body is None and prefer in (None, "oa"):
+                oa_result = await fetch_oa_fulltext(doi)
+                source_url = oa_result.get('source_url')
+                if oa_result.get('text'):
+                    text_body = oa_result['text']
+                    provenance = "oa-fulltext"
+
+            # ── Tier 3: Abstract fallback ────────────────────────────────────
+            if text_body is None and prefer in (None, "abstract"):
+                try:
+                    raw_abs = await client.get_abstract_by(doi, id_type='doi')
+                    details = clean_abstract_details(raw_abs)
+                    description = details.get('description') or ''
+                    if description:
+                        text_body = description
+                        provenance = "scopus-abstract"
+                except Exception as exc:
+                    logger.warning(f"get_fulltext: abstract tier error for doi={doi}: {exc}")
+
+            # ── Build response ───────────────────────────────────────────────
+            char_count = len(text_body) if text_body else 0
+            file_path: Optional[str] = None
+
+            # SD and OA full text always written to disk (can be large).
+            # Short abstracts (<= 3000 chars) are returned inline.
+            ABSTRACT_INLINE_MAX = 3000
+            write_to_disk = text_body and provenance in ('sciencedirect-fulltext', 'oa-fulltext')
+            if not write_to_disk and text_body and char_count > ABSTRACT_INLINE_MAX:
+                write_to_disk = True
+            if write_to_disk:
+                file_path = write_fulltext_to_disk(doi, text_body)
+                sample = text_body[:1500]
+            else:
+                sample = text_body or ''
+
+            summary: dict = {
+                'doi': doi,
+                'provenance': provenance,
+                'char_count': char_count,
+            }
+            if source_url:
+                summary['source_url'] = source_url
+            if file_path:
+                summary['file_path'] = file_path
+            summary['sample'] = sample
+
+            import json as _json
+            return [types.TextContent(type="text", text=_json.dumps(summary, ensure_ascii=False, indent=2))]
 
         elif name == "get_quota_status":
             quota = await client.get_quota_status()

@@ -4,7 +4,7 @@ import httpx
 from typing import Optional, Dict, Any
 from urllib.parse import urljoin
 
-from .config import get_api_key, get_cache_config
+from .config import get_api_key, get_cache_config, get_insttoken
 from .cache import CacheManager
 from .utils import to_scopus_id, to_eid
 
@@ -22,11 +22,14 @@ class ScopusClient:
     def __init__(self):
         self.api_key = get_api_key()
         self.cache_config = get_cache_config()
+        insttoken = get_insttoken()
         self.headers = {
             'X-ELS-APIKey': self.api_key,
             'Accept': 'application/json',
-            'User-Agent': 'ScopusMCP/0.1.0'
+            'User-Agent': 'ScopusMCP/0.7.0',
         }
+        if insttoken:
+            self.headers['X-ELS-Insttoken'] = insttoken
         # Initialize CacheManager with default expiration
         self.cache = CacheManager(expiration_seconds=self.cache_config['default'])
         self.client = httpx.AsyncClient(
@@ -69,15 +72,20 @@ class ScopusClient:
                 
                 # Handle Rate Limiting
                 if response.status_code == 429:
-                    reset_time = int(response.headers.get('X-RateLimit-Reset', asyncio.get_event_loop().time() + 60))
-                    # Calculate wait time, ensure at least 1 second
-                    # Note: asyncio time vs epoch time. X-RateLimit-Reset is usually epoch.
+                    if retries <= 1:
+                        quota_snap = {k: response.headers.get(k, '') for k in (
+                            'X-RateLimit-Remaining', 'X-RateLimit-Reset', 'X-ELS-Status')}
+                        raise Exception(
+                            f"Rate limit exceeded (429) after retries. "
+                            f"Quota headers: {quota_snap}"
+                        )
                     import time
-                    current_time = time.time()
-                    sleep_time = max(reset_time - current_time, 1)
-                    
-                    logger.warning(f"Rate limit exceeded. Sleeping for {sleep_time:.2f} seconds.")
+                    reset_time = int(response.headers.get('X-RateLimit-Reset', 0))
+                    sleep_time = max(reset_time - time.time(), backoff)
+                    logger.warning(f"Rate limit exceeded. Retrying in {sleep_time:.1f}s...")
                     await asyncio.sleep(sleep_time)
+                    retries -= 1
+                    backoff *= 2
                     continue
 
                 response.raise_for_status()
@@ -101,8 +109,23 @@ class ScopusClient:
                     retries -= 1
                     backoff *= 2
                 elif status == 401:
-                     logger.error("Authentication failed. Check your API key.")
-                     raise Exception("Authentication failed: Invalid API Key") from e
+                    logger.error("Authentication failed. Check your API key.")
+                    is_ref = params is not None and params.get('view') == 'REF'
+                    quota_snap = {k: e.response.headers.get(k, '') for k in (
+                        'X-ELS-Status', 'X-RateLimit-Remaining',
+                        'X-RateLimit-Reset', 'X-ELS-Quota-Remaining-Weekly')}
+                    quota_str = ', '.join(f'{k}={v}' for k, v in quota_snap.items() if v)
+                    if is_ref:
+                        msg = (
+                            "REF-view fetch failed: Invalid API Key — likely a "
+                            "REF-view entitlement or quota limit, not a bad key "
+                            "(key works for other endpoints)."
+                        )
+                    else:
+                        msg = "Authentication failed: Invalid API Key"
+                    if quota_str:
+                        msg += f" Quota/rate headers: [{quota_str}]"
+                    raise Exception(msg) from e
                 elif status == 404:
                     logger.info(f"Resource not found: {url}")
                     return {} 
@@ -306,6 +329,27 @@ class ScopusClient:
                 'note': note,
             },
         }
+
+    async def get_sciencedirect_fulltext(self, doi: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve the ScienceDirect full-text-retrieval-response for a DOI.
+        Returns None when the caller lacks entitlement (401/403) or the article
+        is not on ScienceDirect (404).  Requires SCOPUS_INSTTOKEN to be set for
+        most full-text content; without it the response is typically abstract-only.
+        Endpoint: content/article/doi/{doi}
+        """
+        try:
+            return await self._request(
+                'GET',
+                f'content/article/doi/{doi.strip()}',
+                use_cache=False,
+            )
+        except Exception as exc:
+            msg = str(exc).lower()
+            if any(code in msg for code in ('401', '403', 'authentication', 'entitlement')):
+                logger.info(f"ScienceDirect fulltext not entitled for doi={doi}: {exc}")
+                return None
+            raise
 
     async def get_citing_papers(self, scopus_id: str, count: int = 25, start: int = 0, sort: str = 'coverDate') -> Dict[str, Any]:
         """

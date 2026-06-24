@@ -1,6 +1,6 @@
 [project]
 name = "scopus-mcp"
-version = "0.6.1"
+version = "0.7.1"
 description = "A Model Context Protocol server for the Elsevier Scopus API"
 readme = "README.md"
 authors = [
@@ -13,7 +13,8 @@ dependencies = [
     "mcp>=0.1.0",
     "python-dotenv>=1.0.0",
     "matplotlib>=3.8.0",
-    "networkx>=3.2.0"
+    "networkx>=3.2.0",
+    "pymupdf>=1.23.0"
 ]
 
 [project.urls]
