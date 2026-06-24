@@ -1,10 +1,12 @@
 import csv
 import json
+import math
 import os
 import re
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Set
 
 # ---------------------------------------------------------------------------
 # Output-file helpers (reusable by any tool that returns large result sets)
@@ -70,6 +72,120 @@ def should_write_to_disk(
 ) -> bool:
     """Return True when the result count exceeds the inline-return threshold."""
     return len(records) > threshold
+
+
+# ---------------------------------------------------------------------------
+# Citation-network graph helpers
+# ---------------------------------------------------------------------------
+
+EDGE_CSV_COLUMNS = ['source', 'target', 'weight', 'cosine']
+
+
+def compute_pairwise_edges(
+    seed_sets: Dict[str, Set[str]],
+    min_shared: int = 2,
+) -> List[Dict[str, Any]]:
+    """Compute pairwise overlap between seed sets; return a weighted edge list.
+
+    Args:
+        seed_sets: mapping of seed_id → set of reference or citing-paper IDs.
+                   Seeds with empty sets are silently skipped.
+        min_shared: minimum shared items required for an edge to be emitted.
+
+    Returns:
+        List of {'source', 'target', 'weight' (int), 'cosine' (float)},
+        sorted by weight descending. Each unordered pair (a, b) appears once.
+    """
+    seeds = [s for s, refs in seed_sets.items() if refs]
+    edges = []
+    for i in range(len(seeds)):
+        for j in range(i + 1, len(seeds)):
+            a, b = seeds[i], seeds[j]
+            set_a, set_b = seed_sets[a], seed_sets[b]
+            shared = len(set_a & set_b)
+            if shared < min_shared:
+                continue
+            denom = math.sqrt(len(set_a) * len(set_b))
+            cosine = round(shared / denom, 6) if denom > 0 else 0.0
+            edges.append({'source': a, 'target': b, 'weight': shared, 'cosine': cosine})
+    edges.sort(key=lambda e: e['weight'], reverse=True)
+    return edges
+
+
+def write_graph_to_disk(
+    nodes: List[Dict[str, Any]],
+    edges: List[Dict[str, Any]],
+    slug: str,
+) -> Dict[str, str]:
+    """Write graph data to GraphML + CSV edge list; return their absolute paths.
+
+    Node dicts: {id, label, year, venue}  — year and venue may be None.
+    Edge dicts: {source, target, weight, cosine}
+
+    GraphML is written with explicit <key> declarations so it opens cleanly
+    in Gephi and VOSviewer without manual attribute mapping.
+    Output directory follows the same SCOPUS_MCP_OUTPUT_DIR convention as
+    write_results_to_disk.
+    """
+    out = _output_dir()
+    ts = datetime.now().strftime('%Y%m%dT%H%M%S')
+    base = f'scopus-{_query_slug(slug)}-{ts}'
+
+    graphml_path = out / f'{base}.graphml'
+    csv_path = out / f'{base}-edges.csv'
+
+    # ---- GraphML ----
+    root = ET.Element('graphml', {
+        'xmlns': 'http://graphml.graphdrawing.org/graphml',
+        'xmlns:xsi': 'http://www.w3.org/2001/XMLSchema-instance',
+        'xsi:schemaLocation': (
+            'http://graphml.graphdrawing.org/graphml '
+            'http://graphml.graphdrawing.org/graphml/graphml.xsd'
+        ),
+    })
+    # Attribute key declarations
+    for kid, fname, ffor, ftype in [
+        ('d_label',  'label',  'node', 'string'),
+        ('d_year',   'year',   'node', 'string'),
+        ('d_venue',  'venue',  'node', 'string'),
+        ('d_weight', 'weight', 'edge', 'double'),
+        ('d_cosine', 'cosine', 'edge', 'double'),
+    ]:
+        ET.SubElement(root, 'key', {
+            'id': kid, 'for': ffor,
+            'attr.name': fname, 'attr.type': ftype,
+        })
+    graph_el = ET.SubElement(root, 'graph', {'id': 'G', 'edgedefault': 'undirected'})
+    for node in nodes:
+        n_el = ET.SubElement(graph_el, 'node', {'id': str(node['id'])})
+        for key_id, field in [('d_label', 'label'), ('d_year', 'year'), ('d_venue', 'venue')]:
+            val = node.get(field)
+            if val is not None:
+                d = ET.SubElement(n_el, 'data', {'key': key_id})
+                d.text = str(val)
+    for idx, edge in enumerate(edges):
+        e_el = ET.SubElement(graph_el, 'edge', {
+            'id': f'e{idx}',
+            'source': str(edge['source']),
+            'target': str(edge['target']),
+        })
+        dw = ET.SubElement(e_el, 'data', {'key': 'd_weight'})
+        dw.text = str(edge['weight'])
+        dc = ET.SubElement(e_el, 'data', {'key': 'd_cosine'})
+        dc.text = str(edge['cosine'])
+
+    tree = ET.ElementTree(root)
+    ET.indent(tree, space='  ')
+    with graphml_path.open('wb') as f:
+        tree.write(f, encoding='utf-8', xml_declaration=True)
+
+    # ---- CSV edge list ----
+    with csv_path.open('w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=EDGE_CSV_COLUMNS, extrasaction='ignore')
+        writer.writeheader()
+        writer.writerows(edges)
+
+    return {'graphml_path': str(graphml_path), 'csv_path': str(csv_path)}
 
 
 # ---------------------------------------------------------------------------

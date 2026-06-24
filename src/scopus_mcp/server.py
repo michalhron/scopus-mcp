@@ -14,8 +14,12 @@ from .utils import (
     clean_identifiers,
     clean_references,
     detect_id_type,
+    to_scopus_id,
+    to_eid,
     write_results_to_disk,
     should_write_to_disk,
+    compute_pairwise_edges,
+    write_graph_to_disk,
 )
 
 # Configure logging
@@ -171,6 +175,64 @@ async def handle_list_tools() -> list[types.Tool]:
             }
         ),
         types.Tool(
+            name="bibliographic_coupling",
+            description=(
+                "Build a bibliographic-coupling graph for a set of seed papers. "
+                "Two seeds are coupled when they share cited references; edge weight = "
+                "count of shared references, cosine = Salton index. "
+                "Maps the current research front. Requires an entitled (subscriber) key "
+                "for REF-view access. Output: GraphML + CSV edge list written to disk."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "seed_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of Scopus IDs (bare numeric or SCOPUS_ID: prefixed)."
+                    },
+                    "min_shared": {
+                        "type": "integer",
+                        "description": "Minimum shared references for an edge to be emitted (default 2).",
+                        "default": 2
+                    }
+                },
+                "required": ["seed_ids"]
+            }
+        ),
+        types.Tool(
+            name="co_citation",
+            description=(
+                "Build a co-citation graph for a set of seed papers. "
+                "Two seeds are co-cited when a later paper cites both; edge weight = "
+                "count of co-citing papers, cosine = Salton index. "
+                "Maps the intellectual base of a field. "
+                "max_citing_per_seed bounds the API quota used per seed. "
+                "Output: GraphML + CSV edge list written to disk."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "seed_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of Scopus IDs (bare numeric or SCOPUS_ID: prefixed)."
+                    },
+                    "min_shared": {
+                        "type": "integer",
+                        "description": "Minimum co-citing papers for an edge to be emitted (default 2).",
+                        "default": 2
+                    },
+                    "max_citing_per_seed": {
+                        "type": "integer",
+                        "description": "Cap on citing papers fetched per seed (default 500). Limits quota usage.",
+                        "default": 500
+                    }
+                },
+                "required": ["seed_ids"]
+            }
+        ),
+        types.Tool(
             name="get_references",
             description=(
                 "Retrieve the cited-reference list of a document (Backward Citations) "
@@ -312,6 +374,159 @@ async def handle_call_tool(
             if meta.get('note'):
                 text += f"\n\nNote: {meta['note']}"
 
+            return [types.TextContent(type="text", text=text)]
+
+        elif name == "bibliographic_coupling":
+            seed_ids_raw = arguments.get("seed_ids", [])
+            min_shared = int(arguments.get("min_shared", 2))
+
+            if not seed_ids_raw:
+                raise ValueError("seed_ids is required and must be non-empty")
+
+            seed_sets: dict = {}
+            seed_meta: dict = {}
+            skipped: list = []
+
+            for raw_id in seed_ids_raw:
+                sid = to_scopus_id(str(raw_id))
+                try:
+                    raw = await client.get_references(sid)
+                    refs = clean_references(raw)
+                    ref_keys: set = set()
+                    for r in refs:
+                        key = r.get('scopus_id') or r.get('doi')
+                        if key and key != sid:
+                            ref_keys.add(key)
+                    if not ref_keys:
+                        skipped.append(sid)
+                        logger.info(f"bibliographic_coupling: {sid} has no usable refs, skipping")
+                        continue
+                    seed_sets[sid] = ref_keys
+                    # REF view response carries the seed's own coredata — no extra call needed
+                    details = clean_abstract_details(raw)
+                    authors = details.get('authors') or []
+                    seed_meta[sid] = {
+                        'title': details.get('title') or sid,
+                        'creator': authors[0].get('name') if authors else None,
+                        'year': (details.get('cover_date') or '')[:4] or None,
+                        'venue': details.get('publication_name'),
+                    }
+                except Exception as exc:
+                    logger.warning(f"bibliographic_coupling: error for {sid}: {exc}")
+                    skipped.append(sid)
+
+            edges = compute_pairwise_edges(seed_sets, min_shared=min_shared)
+            nodes = [
+                {
+                    'id': sid,
+                    'label': seed_meta.get(sid, {}).get('title', sid),
+                    'year': seed_meta.get(sid, {}).get('year'),
+                    'venue': seed_meta.get(sid, {}).get('venue'),
+                }
+                for sid in seed_sets
+            ]
+            paths = write_graph_to_disk(nodes, edges, f'bibcoupling-{len(seed_ids_raw)}seeds')
+
+            top10 = edges[:10]
+            top10_lines = [
+                f"  {seed_meta.get(e['source'], {}).get('title', e['source'])!r} → "
+                f"{seed_meta.get(e['target'], {}).get('title', e['target'])!r}: "
+                f"weight={e['weight']}, cosine={e['cosine']:.4f}"
+                for e in top10
+            ]
+            text = (
+                f"Bibliographic coupling: {len(seed_sets)}/{len(seed_ids_raw)} seeds processed, "
+                f"{len(edges)} edges emitted (min_shared={min_shared}).\n"
+                f"Graph files:\n"
+                f"  GraphML: {paths['graphml_path']}\n"
+                f"  CSV:     {paths['csv_path']}\n\n"
+                f"Top {len(top10)} edges by weight:\n"
+                + ('\n'.join(top10_lines) if top10_lines else '  (none)')
+            )
+            if skipped:
+                text += f"\n\nSkipped (no usable references or API error): {skipped}"
+            return [types.TextContent(type="text", text=text)]
+
+        elif name == "co_citation":
+            seed_ids_raw = arguments.get("seed_ids", [])
+            min_shared = int(arguments.get("min_shared", 2))
+            max_citing = int(arguments.get("max_citing_per_seed", 500))
+
+            if not seed_ids_raw:
+                raise ValueError("seed_ids is required and must be non-empty")
+
+            seed_sets = {}
+            seed_meta = {}
+            skipped = []
+
+            for raw_id in seed_ids_raw:
+                sid = to_scopus_id(str(raw_id))
+                # Fetch seed metadata (one abstract call per seed)
+                try:
+                    raw_meta = await client.get_abstract(sid)
+                    details = clean_abstract_details(raw_meta)
+                    authors = details.get('authors') or []
+                    seed_meta[sid] = {
+                        'title': details.get('title') or sid,
+                        'creator': authors[0].get('name') if authors else None,
+                        'year': (details.get('cover_date') or '')[:4] or None,
+                        'venue': details.get('publication_name'),
+                    }
+                except Exception as exc:
+                    logger.warning(f"co_citation: metadata fetch failed for {sid}: {exc}")
+                    seed_meta[sid] = {'title': sid, 'creator': None, 'year': None, 'venue': None}
+
+                # Fetch citing papers via search_all with REF() query
+                try:
+                    raw_citers = await client.search_all(
+                        f"REF({to_eid(sid)})", max_results=max_citing
+                    )
+                    citers = clean_search_results(raw_citers)
+                    citer_ids: set = set()
+                    for c in citers:
+                        cid = c.get('scopus_id')
+                        if cid and cid != sid:
+                            citer_ids.add(cid)
+                    if not citer_ids:
+                        skipped.append(sid)
+                        logger.info(f"co_citation: {sid} has no citing papers, skipping")
+                        continue
+                    seed_sets[sid] = citer_ids
+                except Exception as exc:
+                    logger.warning(f"co_citation: citing fetch failed for {sid}: {exc}")
+                    skipped.append(sid)
+
+            edges = compute_pairwise_edges(seed_sets, min_shared=min_shared)
+            nodes = [
+                {
+                    'id': sid,
+                    'label': seed_meta.get(sid, {}).get('title', sid),
+                    'year': seed_meta.get(sid, {}).get('year'),
+                    'venue': seed_meta.get(sid, {}).get('venue'),
+                }
+                for sid in seed_sets
+            ]
+            paths = write_graph_to_disk(nodes, edges, f'cocitation-{len(seed_ids_raw)}seeds')
+
+            top10 = edges[:10]
+            top10_lines = [
+                f"  {seed_meta.get(e['source'], {}).get('title', e['source'])!r} → "
+                f"{seed_meta.get(e['target'], {}).get('title', e['target'])!r}: "
+                f"weight={e['weight']}, cosine={e['cosine']:.4f}"
+                for e in top10
+            ]
+            text = (
+                f"Co-citation: {len(seed_sets)}/{len(seed_ids_raw)} seeds processed, "
+                f"{len(edges)} edges emitted (min_shared={min_shared}, "
+                f"max_citing_per_seed={max_citing}).\n"
+                f"Graph files:\n"
+                f"  GraphML: {paths['graphml_path']}\n"
+                f"  CSV:     {paths['csv_path']}\n\n"
+                f"Top {len(top10)} edges by weight:\n"
+                + ('\n'.join(top10_lines) if top10_lines else '  (none)')
+            )
+            if skipped:
+                text += f"\n\nSkipped (no citing papers or API error): {skipped}"
             return [types.TextContent(type="text", text=text)]
 
         elif name == "get_quota_status":
