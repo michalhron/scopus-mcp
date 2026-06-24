@@ -209,6 +209,102 @@ class ScopusClient:
             ttl=self.cache_config['abstract'],
         )
 
+    async def search_all(self, query: str, max_results: int = 200, sort: str = 'coverDate') -> Dict[str, Any]:
+        """
+        Pages through a Scopus search and returns aggregated results up to max_results.
+
+        Uses start-based paging (page size 200, ceiling 5,000) when max_results <= 5,000.
+        Switches to cursor=* deep paging when max_results > 5,000 — the two modes are
+        mutually exclusive per Scopus API rules.  Deduplicates across pages by dc:identifier.
+        """
+        PAGE_SIZE = 200
+        CURSOR_CEILING = 5000
+
+        all_entries: list = []
+        seen_ids: set = set()
+        total_available: int = 0
+        note: Optional[str] = None
+
+        use_cursor = max_results > CURSOR_CEILING
+
+        if use_cursor:
+            cursor: str = '*'
+            while len(all_entries) < max_results:
+                batch = min(PAGE_SIZE, max_results - len(all_entries))
+                params: Dict[str, Any] = {
+                    'query': query,
+                    'count': batch,
+                    'cursor': cursor,
+                    'sort': sort,
+                    'view': 'STANDARD',
+                }
+                data = await self._request(
+                    'GET', 'content/search/scopus', params,
+                    use_cache=True, ttl=self.cache_config['search'],
+                )
+                sr = data.get('search-results', {})
+                if not total_available:
+                    try:
+                        total_available = int(sr.get('opensearch:totalResults', 0))
+                    except (ValueError, TypeError):
+                        pass
+                entries = sr.get('entry', [])
+                if not entries:
+                    break
+                for e in entries:
+                    uid = e.get('dc:identifier') or e.get('eid') or ''
+                    if uid not in seen_ids:
+                        seen_ids.add(uid)
+                        all_entries.append(e)
+                next_cursor = sr.get('cursor', {}).get('@next')
+                if not next_cursor:
+                    break
+                if len(entries) < batch:
+                    break  # API returned fewer than requested — results exhausted
+                cursor = next_cursor
+        else:
+            start = 0
+            while len(all_entries) < max_results and start < CURSOR_CEILING:
+                batch = min(PAGE_SIZE, max_results - len(all_entries), CURSOR_CEILING - start)
+                data = await self.search_scopus(query, count=batch, start=start, sort=sort)
+                sr = data.get('search-results', {})
+                if not total_available:
+                    try:
+                        total_available = int(sr.get('opensearch:totalResults', 0))
+                    except (ValueError, TypeError):
+                        pass
+                entries = sr.get('entry', [])
+                if not entries:
+                    break
+                added = 0
+                for e in entries:
+                    uid = e.get('dc:identifier') or e.get('eid') or ''
+                    if uid not in seen_ids:
+                        seen_ids.add(uid)
+                        all_entries.append(e)
+                        added += 1
+                start += len(entries)
+                if len(entries) < batch or added == 0:
+                    break  # Exhausted or only duplicates returned
+
+        fetched = len(all_entries)
+        truncated = bool(total_available and fetched < total_available)
+        if truncated:
+            note = (
+                f"Result set capped: fetched {fetched} of {total_available} total "
+                f"(max_results={max_results})."
+            )
+
+        return {
+            'search-results': {'entry': all_entries},
+            '_meta': {
+                'total_fetched': fetched,
+                'total_available': total_available,
+                'truncated': truncated,
+                'note': note,
+            },
+        }
+
     async def get_citing_papers(self, scopus_id: str, count: int = 25, start: int = 0, sort: str = 'coverDate') -> Dict[str, Any]:
         """
         Retrieves forward citations via a Search API REF() query.

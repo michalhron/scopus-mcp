@@ -139,6 +139,36 @@ async def handle_list_tools() -> list[types.Tool]:
             }
         ),
         types.Tool(
+            name="search_all",
+            description=(
+                "Search Scopus and automatically page through results, returning up to "
+                "max_results entries in a single call. Uses STANDARD view (200 results/page). "
+                "For max_results > 5,000 the tool switches to cursor-based deep paging. "
+                "Large max_results values consume significant API quota and may require "
+                "many requests — use conservatively."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The Scopus search query (e.g., 'TITLE(AI) AND PUBYEAR > 2020')."
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum total results to fetch across all pages (default 200). Large values consume quota.",
+                        "default": 200
+                    },
+                    "sort": {
+                        "type": "string",
+                        "description": "Sort order (e.g., 'coverDate', 'relevancy').",
+                        "default": "coverDate"
+                    }
+                },
+                "required": ["query"]
+            }
+        ),
+        types.Tool(
             name="get_references",
             description=(
                 "Retrieve the cited-reference list of a document (Backward Citations) "
@@ -249,6 +279,24 @@ async def handle_call_tool(
                           "references, or your API key may lack REF-view entitlement.")
                 )]
             return [types.TextContent(type="text", text=str(references))]
+
+        elif name == "search_all":
+            query = arguments.get("query")
+            max_results = arguments.get("max_results", 200)
+            sort = arguments.get("sort", "coverDate")
+
+            if not query:
+                raise ValueError("query is required")
+
+            raw_data = await client.search_all(query, max_results=max_results, sort=sort)
+            results = clean_search_results(raw_data)
+            meta = raw_data.get('_meta', {})
+
+            text = str(results)
+            if meta.get('note'):
+                text += f"\n\nNote: {meta['note']}"
+
+            return [types.TextContent(type="text", text=text)]
 
         elif name == "get_quota_status":
             quota = await client.get_quota_status()
