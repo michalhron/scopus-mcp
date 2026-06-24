@@ -308,11 +308,15 @@ class TestCouplingMetadataAndPng(unittest.IsolatedAsyncioTestCase):
 
 class TestCitationLineageDispatch(unittest.IsolatedAsyncioTestCase):
 
-    async def _dispatch(self, args, tmp_dir, get_abstract_fn, search_all_fn):
+    async def _dispatch(self, args, tmp_dir, get_abstract_fn,
+                        search_all_fn=None, get_refs_fn=None):
         with patch('scopus_mcp.server.client') as mock_client, \
              patch.dict(os.environ, {'SCOPUS_MCP_OUTPUT_DIR': tmp_dir}):
             mock_client.get_abstract = AsyncMock(side_effect=get_abstract_fn)
-            mock_client.search_all = AsyncMock(side_effect=search_all_fn)
+            if search_all_fn is not None:
+                mock_client.search_all = AsyncMock(side_effect=search_all_fn)
+            if get_refs_fn is not None:
+                mock_client.get_references = AsyncMock(side_effect=get_refs_fn)
             from scopus_mcp.server import handle_call_tool
             return await handle_call_tool('citation_lineage', args)
 
@@ -457,6 +461,150 @@ class TestCitationLineageDispatch(unittest.IsolatedAsyncioTestCase):
         child_rec = next(r for r in corpus if r['scopus_id'] == 'p1')
         assert child_rec['generation'] == 1
         assert child_rec['title'] == 'Child Paper'
+
+
+# ---------------------------------------------------------------------------
+# Piece 3 continued: backward direction
+# ---------------------------------------------------------------------------
+
+class TestCitationLineageBackward(unittest.IsolatedAsyncioTestCase):
+    """Backward direction walks cited references via get_references."""
+
+    async def _dispatch(self, args, tmp_dir, get_abstract_fn, get_refs_fn):
+        with patch('scopus_mcp.server.client') as mock_client, \
+             patch.dict(os.environ, {'SCOPUS_MCP_OUTPUT_DIR': tmp_dir}):
+            mock_client.get_abstract = AsyncMock(side_effect=get_abstract_fn)
+            mock_client.get_references = AsyncMock(side_effect=get_refs_fn)
+            from scopus_mcp.server import handle_call_tool
+            return await handle_call_tool('citation_lineage', args)
+
+    async def test_backward_calls_get_references_not_search_all(self):
+        """Backward direction must call get_references, not search_all."""
+        with patch('scopus_mcp.server.client') as mock_client, \
+             tempfile.TemporaryDirectory() as td, \
+             patch.dict(os.environ, {'SCOPUS_MCP_OUTPUT_DIR': td}):
+            mock_client.get_abstract = AsyncMock(
+                return_value=_make_abstract_raw('seed1')
+            )
+            mock_client.get_references = AsyncMock(
+                return_value=_make_coupling_ref_raw('seed1', ['ref1', 'ref2'])
+            )
+            # search_all should NOT be called
+            mock_client.search_all = AsyncMock(
+                side_effect=AssertionError("search_all must not be called for backward")
+            )
+            from scopus_mcp.server import handle_call_tool
+            result = await handle_call_tool(
+                'citation_lineage',
+                {'seed_id': 'seed1', 'generations': 1, 'direction': 'backward'},
+            )
+        assert 'Citation lineage (backward)' in result[0].text
+
+    async def test_backward_assigns_generations(self):
+        """Refs fetched in gen 1 must have generation=1 in corpus."""
+        with tempfile.TemporaryDirectory() as td:
+            result = await self._dispatch(
+                {'seed_id': 'seed1', 'generations': 1, 'direction': 'backward'},
+                td,
+                lambda sid: _make_abstract_raw(sid),
+                lambda sid: _make_coupling_ref_raw(
+                    sid, ['r1', 'r2', 'r3'], title=f'Paper {sid}'
+                ),
+            )
+            text = result[0].text
+            corpus = _read_corpus(text)
+
+        assert 'gen 1: 3' in text
+        gen1 = [r for r in corpus if r['generation'] == 1]
+        assert len(gen1) == 3
+        assert all(r['generation'] == 1 for r in gen1)
+
+    async def test_backward_dedup_across_generations(self):
+        """A ref seen in gen 1 must not reappear in gen 2 (same dedup machinery)."""
+        call_count = [0]
+
+        def refs_side(sid):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # seed's refs: r1 only
+                return _make_coupling_ref_raw(sid, ['r1'])
+            # r1's refs: r1 already seen, r2 new
+            return _make_coupling_ref_raw(sid, ['r1', 'r2'])
+
+        with tempfile.TemporaryDirectory() as td:
+            result = await self._dispatch(
+                {'seed_id': 'seed1', 'generations': 2, 'direction': 'backward'},
+                td,
+                lambda sid: _make_abstract_raw(sid),
+                refs_side,
+            )
+            text = result[0].text
+            corpus = _read_corpus(text)
+
+        assert 'gen 1: 1' in text
+        assert 'gen 2: 1' in text
+        non_seed = [r for r in corpus if r['generation'] > 0]
+        assert len(non_seed) == 2
+        assert {r['scopus_id'] for r in non_seed} == {'r1', 'r2'}
+
+    async def test_backward_skips_refs_with_no_id(self):
+        """References with neither scopus_id nor doi must be silently skipped."""
+        raw_with_blanks = {
+            'abstracts-retrieval-response': {
+                'coredata': {
+                    'dc:identifier': 'SCOPUS_ID:seed1',
+                    'dc:title': 'Seed', 'prism:coverDate': '2020-01-01',
+                    'prism:publicationName': 'J', 'link': [],
+                },
+                'authors': {'author': [{'ce:indexed-name': 'A.', '@auid': '1'}]},
+                'references': {
+                    'reference': [
+                        # good ref
+                        {
+                            '@id': '1', 'scopus-id': 'goodref',
+                            'title': 'Good', 'sourcetitle': 'J',
+                            'prism:coverDate': '2000-01-01',
+                            'author-list': {'author': []},
+                        },
+                        # no scopus-id, no doi → must be skipped
+                        {
+                            '@id': '2', 'title': 'No IDs', 'sourcetitle': 'J',
+                            'prism:coverDate': '2001-01-01',
+                            'author-list': {'author': []},
+                        },
+                    ]
+                },
+            }
+        }
+        with tempfile.TemporaryDirectory() as td:
+            result = await self._dispatch(
+                {'seed_id': 'seed1', 'generations': 1, 'direction': 'backward'},
+                td,
+                lambda sid: _make_abstract_raw(sid),
+                lambda sid: raw_with_blanks,
+            )
+            corpus = _read_corpus(result[0].text)
+
+        non_seed = [r for r in corpus if r['generation'] > 0]
+        assert len(non_seed) == 1
+        assert non_seed[0]['scopus_id'] == 'goodref'
+
+    async def test_forward_is_default_direction(self):
+        """Without explicit direction, the tool must use forward (calls search_all)."""
+        search_called = [False]
+
+        async def search_side(query, **kw):
+            search_called[0] = True
+            return _make_search_raw([])
+
+        with tempfile.TemporaryDirectory() as td:
+            await TestCitationLineageDispatch()._dispatch(
+                {'seed_id': 'seed1', 'generations': 1},
+                td,
+                lambda sid: _make_abstract_raw(sid),
+                search_side,
+            )
+        assert search_called[0], "forward direction should call search_all"
 
 
 if __name__ == '__main__':

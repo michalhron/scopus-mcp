@@ -291,9 +291,22 @@ async def handle_list_tools() -> list[types.Tool]:
                         "description": (
                             "Only expand papers that have at least this many citing papers "
                             "(default 0 = expand all up to max_per_node). Pruning high "
-                            "values avoids exploding on trivially-cited nodes."
+                            "values avoids exploding on trivially-cited nodes. "
+                            "Ignored for backward direction."
                         ),
                         "default": 0
+                    },
+                    "direction": {
+                        "type": "string",
+                        "description": (
+                            "'forward' (default): walk citing papers via search_all + REF(). "
+                            "Fan-out can be large; use max_per_node to bound quota. "
+                            "'backward': walk cited references via get_references. "
+                            "Fan-out is naturally bounded (~40 refs/paper); "
+                            "references with neither scopus_id nor doi are skipped."
+                        ),
+                        "enum": ["forward", "backward"],
+                        "default": "forward"
                     }
                 },
                 "required": ["seed_id"]
@@ -589,6 +602,9 @@ async def handle_call_tool(
             generations = min(int(arguments.get("generations", 1)), 3)
             max_per_node = int(arguments.get("max_per_node", 200))
             min_citing = int(arguments.get("min_citing", 0))
+            direction = (arguments.get("direction") or "forward").lower()
+            if direction not in ("forward", "backward"):
+                raise ValueError("direction must be 'forward' or 'backward'")
 
             seed_id = to_scopus_id(str(seed_id_raw))
 
@@ -601,7 +617,6 @@ async def handle_call_tool(
                     f"Could not fetch seed metadata for {seed_id}: {exc}"
                 ) from exc
 
-            seed_authors = details.get('authors') or []
             seed_paper = {
                 'scopus_id': seed_id,
                 'doi': details.get('doi'),
@@ -619,51 +634,97 @@ async def handle_call_tool(
             api_calls = 1  # the get_abstract above
             gen_counts: dict = {0: 1}
 
+            async def _fetch_next(parent_id: str) -> list:
+                """Return a flat list of candidate-paper dicts for the next generation.
+
+                Each dict carries: key (stable dedup id), scopus_id, doi, title,
+                year, venue, cited_by_count.  The only difference between directions
+                is which client method is called and how the raw result is mapped.
+                """
+                if direction == 'forward':
+                    raw = await client.search_all(
+                        f"REF({to_eid(parent_id)})", max_results=max_per_node
+                    )
+                    return [
+                        {
+                            'key': p['scopus_id'],
+                            'scopus_id': p['scopus_id'],
+                            'doi': p.get('doi'),
+                            'title': p.get('title'),
+                            'year': (p.get('cover_date') or '')[:4] or None,
+                            'venue': p.get('publication_name'),
+                            'cited_by_count': p.get('cited_by_count') or '0',
+                        }
+                        for p in clean_search_results(raw)
+                        if p.get('scopus_id')
+                    ]
+                else:  # backward — walk cited references
+                    raw = await client.get_references(parent_id)
+                    result = []
+                    for r in clean_references(raw, limit=max_per_node):
+                        sid = r.get('scopus_id')
+                        doi = r.get('doi')
+                        if not sid and not doi:
+                            continue
+                        # Prefer scopus_id as key; fall back to doi: prefix to avoid collisions
+                        key = sid if sid else f'doi:{doi}'
+                        result.append({
+                            'key': key,
+                            'scopus_id': sid,
+                            'doi': doi,
+                            'title': r.get('title'),
+                            'year': r.get('year'),
+                            'venue': r.get('source'),
+                            'cited_by_count': None,
+                        })
+                    return result
+
             for gen in range(1, generations + 1):
                 next_to_expand = []
                 for parent_id in to_expand:
                     if not parent_id:
                         continue
                     try:
-                        raw_citers = await client.search_all(
-                            f"REF({to_eid(parent_id)})", max_results=max_per_node
-                        )
+                        papers = await _fetch_next(parent_id)
                         api_calls += 1
-                        citers = clean_search_results(raw_citers)
                     except Exception as exc:
                         logger.warning(
-                            f"citation_lineage: search failed for {parent_id}: {exc}"
+                            f"citation_lineage ({direction}): fetch failed for "
+                            f"{parent_id}: {exc}"
                         )
                         continue
 
-                    for paper in citers:
-                        sid = paper.get('scopus_id')
-                        if not sid:
-                            continue
-                        if sid in seen:
+                    for p in papers:
+                        key = p['key']
+                        if key in seen:
                             # Record additional parent without changing generation
-                            if sid in all_papers and parent_id not in all_papers[sid]['parents']:
-                                all_papers[sid]['parents'].append(parent_id)
+                            if key in all_papers and parent_id not in all_papers[key]['parents']:
+                                all_papers[key]['parents'].append(parent_id)
                             continue
-                        seen.add(sid)
-                        cbc_str = paper.get('cited_by_count') or '0'
+                        seen.add(key)
+                        cbc_str = p.get('cited_by_count')
                         try:
-                            cbc = int(cbc_str)
+                            cbc = int(cbc_str or 0)
                         except (ValueError, TypeError):
                             cbc = 0
-                        all_papers[sid] = {
-                            'scopus_id': sid,
-                            'doi': paper.get('doi'),
-                            'title': paper.get('title'),
-                            'year': (paper.get('cover_date') or '')[:4] or None,
-                            'venue': paper.get('publication_name'),
+                        all_papers[key] = {
+                            'scopus_id': p['scopus_id'],
+                            'doi': p['doi'],
+                            'title': p['title'],
+                            'year': p['year'],
+                            'venue': p['venue'],
                             'generation': gen,
                             'parents': [parent_id],
                             'cited_by_count': cbc_str,
                         }
                         gen_counts[gen] = gen_counts.get(gen, 0) + 1
-                        if gen < generations and cbc >= min_citing:
-                            next_to_expand.append(sid)
+
+                        # Expansion criteria for the next generation.
+                        # Only expand papers we can fetch by Scopus ID.
+                        # min_citing applies to forward only (backward refs lack cbc).
+                        if gen < generations and p['scopus_id']:
+                            if direction == 'backward' or cbc >= min_citing:
+                                next_to_expand.append(p['scopus_id'])
 
                 to_expand = next_to_expand
                 if not to_expand:
@@ -686,10 +747,10 @@ async def handle_call_tool(
             )
 
             text = (
-                f"Citation lineage for {seed_id} "
+                f"Citation lineage ({direction}) for {seed_id} "
                 f"({seed_paper.get('title', seed_id)!r}).\n"
                 f"Generations walked: {generations}. "
-                f"Papers per generation: {gen_summary or 'none (no citing papers found)'}.\n"
+                f"Papers per generation: {gen_summary or 'none (no papers found)'}.\n"
                 f"Total unique papers (excl. seed): {len(non_seed)}. "
                 f"API calls: {api_calls}.\n"
                 f"Corpus written to: {json_path}\n\n"
@@ -702,7 +763,7 @@ async def handle_call_tool(
                     f"— {r.get('cited_by_count', '?')} citations\n"
                 )
             if not top10:
-                text += "  (no citing papers found)\n"
+                text += "  (no papers found)\n"
 
             return [types.TextContent(type="text", text=text)]
 
