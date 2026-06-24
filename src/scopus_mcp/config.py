@@ -44,6 +44,20 @@ def get_api_key() -> str:
         
     return api_key
 
+def get_insttoken() -> Optional[str]:
+    """
+    Retrieves the optional institutional token with the following precedence:
+    1. Environment variable 'SCOPUS_INSTTOKEN'
+    2. config.json 'insttoken' field
+    Returns None when not configured.
+    """
+    token = os.getenv('SCOPUS_INSTTOKEN')
+    if token:
+        return token
+    config = load_config_file()
+    return config.get('insttoken') or None
+
+
 def get_cache_config() -> Dict[str, int]:
     """
     Retrieves cache expiration settings from env vars or config.json.
