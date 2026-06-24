@@ -20,6 +20,8 @@ from .utils import (
     should_write_to_disk,
     compute_pairwise_edges,
     write_graph_to_disk,
+    _make_node_label,
+    write_lineage_to_disk,
 )
 
 # Configure logging
@@ -254,6 +256,48 @@ async def handle_list_tools() -> list[types.Tool]:
                 },
                 "required": ["scopus_id"]
             }
+        ),
+        types.Tool(
+            name="citation_lineage",
+            description=(
+                "Walk the forward-citation lineage of a seed paper across multiple generations. "
+                "Generation 1 = papers that directly cite the seed; generation 2 = papers that "
+                "cite those; up to 3 generations. All papers are deduplicated globally across "
+                "generations. Output: lineage corpus written to disk as JSON (one record per "
+                "paper with scopus_id, doi, title, year, venue, generation, parents, "
+                "cited_by_count). Returns a compact inline summary; never dumps the full corpus "
+                "inline. Use max_per_node to bound API quota per paper."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "seed_id": {
+                        "type": "string",
+                        "description": "Scopus ID or EID of the seed paper."
+                    },
+                    "generations": {
+                        "type": "integer",
+                        "description": "Number of generations to walk (default 1, max 3).",
+                        "default": 1,
+                        "maximum": 3
+                    },
+                    "max_per_node": {
+                        "type": "integer",
+                        "description": "Cap on citing papers fetched per paper per generation (default 200).",
+                        "default": 200
+                    },
+                    "min_citing": {
+                        "type": "integer",
+                        "description": (
+                            "Only expand papers that have at least this many citing papers "
+                            "(default 0 = expand all up to max_per_node). Pruning high "
+                            "values avoids exploding on trivially-cited nodes."
+                        ),
+                        "default": 0
+                    }
+                },
+                "required": ["seed_id"]
+            }
         )
     ]
 
@@ -419,7 +463,9 @@ async def handle_call_tool(
             nodes = [
                 {
                     'id': sid,
-                    'label': seed_meta.get(sid, {}).get('title', sid),
+                    'label': _make_node_label(seed_meta.get(sid, {}), node_id=sid),
+                    'title': seed_meta.get(sid, {}).get('title'),
+                    'creator': seed_meta.get(sid, {}).get('creator'),
                     'year': seed_meta.get(sid, {}).get('year'),
                     'venue': seed_meta.get(sid, {}).get('venue'),
                 }
@@ -439,10 +485,12 @@ async def handle_call_tool(
                 f"{len(edges)} edges emitted (min_shared={min_shared}).\n"
                 f"Graph files:\n"
                 f"  GraphML: {paths['graphml_path']}\n"
-                f"  CSV:     {paths['csv_path']}\n\n"
-                f"Top {len(top10)} edges by weight:\n"
-                + ('\n'.join(top10_lines) if top10_lines else '  (none)')
+                f"  CSV:     {paths['csv_path']}\n"
             )
+            if paths.get('png_path'):
+                text += f"  PNG:     {paths['png_path']}\n"
+            text += f"\nTop {len(top10)} edges by weight:\n"
+            text += '\n'.join(top10_lines) if top10_lines else '  (none)'
             if skipped:
                 text += f"\n\nSkipped (no usable references or API error): {skipped}"
             return [types.TextContent(type="text", text=text)]
@@ -500,7 +548,9 @@ async def handle_call_tool(
             nodes = [
                 {
                     'id': sid,
-                    'label': seed_meta.get(sid, {}).get('title', sid),
+                    'label': _make_node_label(seed_meta.get(sid, {}), node_id=sid),
+                    'title': seed_meta.get(sid, {}).get('title'),
+                    'creator': seed_meta.get(sid, {}).get('creator'),
                     'year': seed_meta.get(sid, {}).get('year'),
                     'venue': seed_meta.get(sid, {}).get('venue'),
                 }
@@ -521,12 +571,139 @@ async def handle_call_tool(
                 f"max_citing_per_seed={max_citing}).\n"
                 f"Graph files:\n"
                 f"  GraphML: {paths['graphml_path']}\n"
-                f"  CSV:     {paths['csv_path']}\n\n"
-                f"Top {len(top10)} edges by weight:\n"
-                + ('\n'.join(top10_lines) if top10_lines else '  (none)')
+                f"  CSV:     {paths['csv_path']}\n"
             )
+            if paths.get('png_path'):
+                text += f"  PNG:     {paths['png_path']}\n"
+            text += f"\nTop {len(top10)} edges by weight:\n"
+            text += '\n'.join(top10_lines) if top10_lines else '  (none)'
             if skipped:
                 text += f"\n\nSkipped (no citing papers or API error): {skipped}"
+            return [types.TextContent(type="text", text=text)]
+
+        elif name == "citation_lineage":
+            seed_id_raw = arguments.get("seed_id")
+            if not seed_id_raw:
+                raise ValueError("seed_id is required")
+
+            generations = min(int(arguments.get("generations", 1)), 3)
+            max_per_node = int(arguments.get("max_per_node", 200))
+            min_citing = int(arguments.get("min_citing", 0))
+
+            seed_id = to_scopus_id(str(seed_id_raw))
+
+            # Fetch seed metadata (generation 0)
+            try:
+                raw_meta = await client.get_abstract(seed_id)
+                details = clean_abstract_details(raw_meta)
+            except Exception as exc:
+                raise ValueError(
+                    f"Could not fetch seed metadata for {seed_id}: {exc}"
+                ) from exc
+
+            seed_authors = details.get('authors') or []
+            seed_paper = {
+                'scopus_id': seed_id,
+                'doi': details.get('doi'),
+                'title': details.get('title'),
+                'year': (details.get('cover_date') or '')[:4] or None,
+                'venue': details.get('publication_name'),
+                'generation': 0,
+                'parents': [],
+                'cited_by_count': details.get('cited_by_count'),
+            }
+
+            seen: set = {seed_id}
+            all_papers: dict = {seed_id: seed_paper}
+            to_expand = [seed_id]
+            api_calls = 1  # the get_abstract above
+            gen_counts: dict = {0: 1}
+
+            for gen in range(1, generations + 1):
+                next_to_expand = []
+                for parent_id in to_expand:
+                    if not parent_id:
+                        continue
+                    try:
+                        raw_citers = await client.search_all(
+                            f"REF({to_eid(parent_id)})", max_results=max_per_node
+                        )
+                        api_calls += 1
+                        citers = clean_search_results(raw_citers)
+                    except Exception as exc:
+                        logger.warning(
+                            f"citation_lineage: search failed for {parent_id}: {exc}"
+                        )
+                        continue
+
+                    for paper in citers:
+                        sid = paper.get('scopus_id')
+                        if not sid:
+                            continue
+                        if sid in seen:
+                            # Record additional parent without changing generation
+                            if sid in all_papers and parent_id not in all_papers[sid]['parents']:
+                                all_papers[sid]['parents'].append(parent_id)
+                            continue
+                        seen.add(sid)
+                        cbc_str = paper.get('cited_by_count') or '0'
+                        try:
+                            cbc = int(cbc_str)
+                        except (ValueError, TypeError):
+                            cbc = 0
+                        all_papers[sid] = {
+                            'scopus_id': sid,
+                            'doi': paper.get('doi'),
+                            'title': paper.get('title'),
+                            'year': (paper.get('cover_date') or '')[:4] or None,
+                            'venue': paper.get('publication_name'),
+                            'generation': gen,
+                            'parents': [parent_id],
+                            'cited_by_count': cbc_str,
+                        }
+                        gen_counts[gen] = gen_counts.get(gen, 0) + 1
+                        if gen < generations and cbc >= min_citing:
+                            next_to_expand.append(sid)
+
+                to_expand = next_to_expand
+                if not to_expand:
+                    break
+
+            records_list = list(all_papers.values())
+            json_path = write_lineage_to_disk(records_list, seed_id)
+
+            non_seed = [r for r in records_list if r['generation'] > 0]
+            top10 = sorted(
+                non_seed,
+                key=lambda r: int(r.get('cited_by_count') or 0),
+                reverse=True,
+            )[:10]
+
+            gen_summary = ', '.join(
+                f"gen {g}: {c}"
+                for g, c in sorted(gen_counts.items())
+                if g > 0
+            )
+
+            text = (
+                f"Citation lineage for {seed_id} "
+                f"({seed_paper.get('title', seed_id)!r}).\n"
+                f"Generations walked: {generations}. "
+                f"Papers per generation: {gen_summary or 'none (no citing papers found)'}.\n"
+                f"Total unique papers (excl. seed): {len(non_seed)}. "
+                f"API calls: {api_calls}.\n"
+                f"Corpus written to: {json_path}\n\n"
+                f"Top 10 most-cited papers in lineage:\n"
+            )
+            for r in top10:
+                text += (
+                    f"  [gen {r['generation']}] {r.get('title', r['scopus_id'])!r} "
+                    f"({r.get('year', '?')}, {r.get('venue', '?')}) "
+                    f"— {r.get('cited_by_count', '?')} citations\n"
+                )
+            if not top10:
+                text += "  (no citing papers found)\n"
+
             return [types.TextContent(type="text", text=text)]
 
         elif name == "get_quota_status":

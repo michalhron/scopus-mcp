@@ -1,5 +1,6 @@
 import csv
 import json
+import logging
 import math
 import os
 import re
@@ -7,6 +8,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Set
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Output-file helpers (reusable by any tool that returns large result sets)
@@ -81,6 +84,23 @@ def should_write_to_disk(
 EDGE_CSV_COLUMNS = ['source', 'target', 'weight', 'cosine']
 
 
+def _make_node_label(meta: Dict[str, Any], node_id: str = '') -> str:
+    """Derive a short readable label for a graph node.
+
+    Priority: 'Surname YYYY' (from ce:indexed-name + year) → title[:40] → node_id.
+    """
+    creator = (meta.get('creator') or '').strip()
+    year = (meta.get('year') or '').strip()
+    if creator:
+        # ce:indexed-name is 'Surname I.' — first token is the surname
+        surname = creator.split()[0].rstrip('.,')
+        return f'{surname} {year}' if year else surname
+    title = (meta.get('title') or '').strip()
+    if title:
+        return title[:40]
+    return node_id or str(meta.get('id', ''))
+
+
 def compute_pairwise_edges(
     seed_sets: Dict[str, Set[str]],
     min_shared: int = 2,
@@ -117,15 +137,15 @@ def write_graph_to_disk(
     edges: List[Dict[str, Any]],
     slug: str,
 ) -> Dict[str, str]:
-    """Write graph data to GraphML + CSV edge list; return their absolute paths.
+    """Write graph data to GraphML + CSV edge list + PNG; return their absolute paths.
 
-    Node dicts: {id, label, year, venue}  — year and venue may be None.
+    Node dicts: {id, label, title, creator, year, venue} — all except id may be None.
     Edge dicts: {source, target, weight, cosine}
 
-    GraphML is written with explicit <key> declarations so it opens cleanly
-    in Gephi and VOSviewer without manual attribute mapping.
-    Output directory follows the same SCOPUS_MCP_OUTPUT_DIR convention as
-    write_results_to_disk.
+    GraphML carries explicit <key> declarations (label, title, creator, year, venue)
+    so it opens cleanly in Gephi and VOSviewer. PNG is rendered via render_graph_png
+    alongside the other files; render failures are non-fatal (png_path=None in result).
+    Output directory follows the SCOPUS_MCP_OUTPUT_DIR convention.
     """
     out = _output_dir()
     ts = datetime.now().strftime('%Y%m%dT%H%M%S')
@@ -143,13 +163,14 @@ def write_graph_to_disk(
             'http://graphml.graphdrawing.org/graphml/graphml.xsd'
         ),
     })
-    # Attribute key declarations
     for kid, fname, ffor, ftype in [
-        ('d_label',  'label',  'node', 'string'),
-        ('d_year',   'year',   'node', 'string'),
-        ('d_venue',  'venue',  'node', 'string'),
-        ('d_weight', 'weight', 'edge', 'double'),
-        ('d_cosine', 'cosine', 'edge', 'double'),
+        ('d_label',   'label',   'node', 'string'),
+        ('d_title',   'title',   'node', 'string'),
+        ('d_creator', 'creator', 'node', 'string'),
+        ('d_year',    'year',    'node', 'string'),
+        ('d_venue',   'venue',   'node', 'string'),
+        ('d_weight',  'weight',  'edge', 'double'),
+        ('d_cosine',  'cosine',  'edge', 'double'),
     ]:
         ET.SubElement(root, 'key', {
             'id': kid, 'for': ffor,
@@ -158,7 +179,10 @@ def write_graph_to_disk(
     graph_el = ET.SubElement(root, 'graph', {'id': 'G', 'edgedefault': 'undirected'})
     for node in nodes:
         n_el = ET.SubElement(graph_el, 'node', {'id': str(node['id'])})
-        for key_id, field in [('d_label', 'label'), ('d_year', 'year'), ('d_venue', 'venue')]:
+        for key_id, field in [
+            ('d_label', 'label'), ('d_title', 'title'), ('d_creator', 'creator'),
+            ('d_year', 'year'), ('d_venue', 'venue'),
+        ]:
             val = node.get(field)
             if val is not None:
                 d = ET.SubElement(n_el, 'data', {'key': key_id})
@@ -185,7 +209,96 @@ def write_graph_to_disk(
         writer.writeheader()
         writer.writerows(edges)
 
-    return {'graphml_path': str(graphml_path), 'csv_path': str(csv_path)}
+    # ---- PNG (non-fatal) ----
+    png_path = None
+    try:
+        png_path = render_graph_png(nodes, edges, base)
+    except Exception as exc:
+        logger.warning(f'write_graph_to_disk: render_graph_png non-fatal error: {exc}')
+
+    return {
+        'graphml_path': str(graphml_path),
+        'csv_path': str(csv_path),
+        'png_path': png_path,
+    }
+
+
+def render_graph_png(
+    nodes: List[Dict[str, Any]],
+    edges: List[Dict[str, Any]],
+    base_filename: str,
+) -> Optional[str]:
+    """Render the graph to PNG via networkx + matplotlib (Agg backend).
+
+    Returns the absolute path to the PNG, or None if the graph is empty or
+    rendering fails for any reason. Never raises — errors are logged and
+    the caller continues with GraphML/CSV as the primary artifacts.
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import networkx as nx
+
+        out = _output_dir()
+        png_path = out / f'{base_filename}.png'
+
+        G = nx.Graph()
+        for node in nodes:
+            G.add_node(str(node['id']), label=node.get('label', str(node['id'])))
+        for edge in edges:
+            G.add_edge(
+                str(edge['source']), str(edge['target']),
+                weight=float(edge.get('weight', 1)),
+            )
+
+        if len(G.nodes) == 0:
+            return None
+
+        fig, ax = plt.subplots(figsize=(12, 8))
+        pos = nx.spring_layout(G, seed=42, k=2.0 / math.sqrt(max(len(G.nodes), 1)))
+
+        degrees = dict(G.degree())
+        node_sizes = [max(200, 150 * degrees.get(n, 1)) for n in G.nodes]
+
+        weights = [G[u][v].get('weight', 1) for u, v in G.edges]
+        max_w = max(weights) if weights else 1
+        edge_widths = [0.5 + 3.5 * w / max_w for w in weights]
+
+        nx.draw_networkx_nodes(G, pos, node_size=node_sizes, ax=ax, alpha=0.85)
+        nx.draw_networkx_edges(G, pos, width=edge_widths, ax=ax, alpha=0.5)
+        nx.draw_networkx_labels(
+            G, pos,
+            labels={n: G.nodes[n]['label'] for n in G.nodes},
+            ax=ax, font_size=7,
+        )
+
+        ax.set_axis_off()
+        plt.tight_layout()
+        plt.savefig(str(png_path), dpi=150, bbox_inches='tight')
+        plt.close(fig)
+
+        return str(png_path)
+    except Exception as exc:
+        logger.warning(f'render_graph_png failed (non-fatal): {exc}')
+        return None
+
+
+def write_lineage_to_disk(records: List[Dict[str, Any]], seed_id: str) -> str:
+    """Write citation lineage corpus to JSON; return absolute path.
+
+    Each record: {scopus_id, doi, title, year, venue, generation, parents, cited_by_count}.
+    Output directory follows the SCOPUS_MCP_OUTPUT_DIR convention.
+    """
+    out = _output_dir()
+    ts = datetime.now().strftime('%Y%m%dT%H%M%S')
+    slug = _query_slug(f'lineage-{seed_id}')
+    json_path = out / f'scopus-{slug}-{ts}.json'
+    json_path.write_text(
+        json.dumps(records, ensure_ascii=False, indent=2),
+        encoding='utf-8',
+    )
+    return str(json_path)
 
 
 # ---------------------------------------------------------------------------
