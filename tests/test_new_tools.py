@@ -8,6 +8,7 @@ from scopus_mcp.utils import (
     detect_id_type,
     clean_identifiers,
     clean_references,
+    clean_search_results,
 )
 
 
@@ -114,3 +115,45 @@ def test_clean_references_handles_single_dict_and_limit():
 def test_clean_references_empty_on_garbage():
     assert clean_references({}) == []
     assert clean_references({"abstracts-retrieval-response": {}}) == []
+
+
+# ---------------------------------------------------------------------------
+# Bug 1: clean_search_results empty-set / error-sentinel handling
+# ---------------------------------------------------------------------------
+
+def test_clean_search_results_empty_on_total_zero():
+    """totalResults '0' must return [] even when entry contains an error object."""
+    data = {
+        'search-results': {
+            'opensearch:totalResults': '0',
+            'entry': [{'error': 'Result set was empty'}],
+        }
+    }
+    assert clean_search_results(data) == []
+
+
+def test_clean_search_results_empty_on_error_entry_without_identifier():
+    """An entry with an 'error' key and no dc:identifier is silently dropped."""
+    data = {
+        'search-results': {
+            'opensearch:totalResults': '1',   # API may still say 1
+            'entry': [{'error': 'Result set was empty'}],
+        }
+    }
+    assert clean_search_results(data) == []
+
+
+def test_clean_search_results_keeps_real_entry_alongside_error_entry():
+    """A real entry that co-exists with an error entry is preserved."""
+    data = {
+        'search-results': {
+            'opensearch:totalResults': '2',
+            'entry': [
+                {'error': 'some sentinel'},
+                {'dc:identifier': 'SCOPUS_ID:99', 'dc:title': 'Real paper'},
+            ],
+        }
+    }
+    result = clean_search_results(data)
+    assert len(result) == 1
+    assert result[0]['scopus_id'] == '99'

@@ -1,4 +1,80 @@
+import csv
+import json
+import os
+import re
+from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Any, Optional
+
+# ---------------------------------------------------------------------------
+# Output-file helpers (reusable by any tool that returns large result sets)
+# ---------------------------------------------------------------------------
+
+CSV_COLUMNS = [
+    'scopus_id', 'title', 'creator', 'publication_name',
+    'cover_date', 'doi', 'cited_by_count', 'aggregation_type', 'url',
+]
+
+# Inline-vs-file threshold: result sets larger than this are written to disk.
+SEARCH_ALL_INLINE_THRESHOLD = 50
+
+
+def _output_dir() -> Path:
+    """Resolve the directory for large result dumps.
+
+    Order: SCOPUS_MCP_OUTPUT_DIR env var → ~/scopus-mcp-output.
+    Creates the directory (and parents) if absent.
+    """
+    d = os.environ.get('SCOPUS_MCP_OUTPUT_DIR')
+    path = Path(d).expanduser() if d else Path.home() / 'scopus-mcp-output'
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _query_slug(query: str) -> str:
+    """Derive a short, filesystem-safe slug from a Scopus query string."""
+    slug = re.sub(r'[^\w\s-]', '', query.lower())
+    slug = re.sub(r'[\s_-]+', '-', slug).strip('-')
+    return slug[:50] or 'query'
+
+
+def write_results_to_disk(records: List[Dict[str, Any]], query: str) -> Dict[str, str]:
+    """Write cleaned records to JSON and CSV files; return their absolute paths.
+
+    Output directory: SCOPUS_MCP_OUTPUT_DIR if set, else ~/scopus-mcp-output.
+    CSV columns: scopus_id, title, creator, publication_name, cover_date,
+                 doi, cited_by_count, aggregation_type, url.
+    """
+    out = _output_dir()
+    ts = datetime.now().strftime('%Y%m%dT%H%M%S')
+    base = f'scopus-{_query_slug(query)}-{ts}'
+
+    json_path = out / f'{base}.json'
+    csv_path = out / f'{base}.csv'
+
+    json_path.write_text(
+        json.dumps(records, ensure_ascii=False, indent=2),
+        encoding='utf-8',
+    )
+    with csv_path.open('w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, extrasaction='ignore')
+        writer.writeheader()
+        writer.writerows(records)
+
+    return {'json_path': str(json_path), 'csv_path': str(csv_path)}
+
+
+def should_write_to_disk(
+    records: List[Dict[str, Any]],
+    threshold: int = SEARCH_ALL_INLINE_THRESHOLD,
+) -> bool:
+    """Return True when the result count exceeds the inline-return threshold."""
+    return len(records) > threshold
+
+
+# ---------------------------------------------------------------------------
+# Search result cleaner
+# ---------------------------------------------------------------------------
 
 def clean_search_results(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
@@ -9,14 +85,25 @@ def clean_search_results(data: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     Returns:
         A list of simplified dictionaries containing key article metadata.
+        Returns [] when there are zero results or when the API returns an
+        error-sentinel entry (no dc:identifier, carries an 'error' key).
     """
     if not data or 'search-results' not in data:
         return []
-    
-    entries = data['search-results'].get('entry', [])
+
+    sr = data['search-results']
+
+    # Scopus signals an empty result set with totalResults "0".
+    if str(sr.get('opensearch:totalResults', '')).strip() == '0':
+        return []
+
+    entries = sr.get('entry', [])
     cleaned_entries = []
-    
+
     for entry in entries:
+        # Skip error-sentinel entries: they carry an 'error' key and no real ID.
+        if entry.get('error') and not entry.get('dc:identifier'):
+            continue
         cleaned = {
             'scopus_id': entry.get('dc:identifier', '').replace('SCOPUS_ID:', ''),
             'title': entry.get('dc:title'),
@@ -29,7 +116,7 @@ def clean_search_results(data: Dict[str, Any]) -> List[Dict[str, Any]]:
             'url': next((link['@href'] for link in entry.get('link', []) if link.get('@ref') == 'scopus'), None)
         }
         cleaned_entries.append(cleaned)
-        
+
     return cleaned_entries
 
 def clean_abstract_details(data: Dict[str, Any]) -> Dict[str, Any]:

@@ -14,6 +14,8 @@ from .utils import (
     clean_identifiers,
     clean_references,
     detect_id_type,
+    write_results_to_disk,
+    should_write_to_disk,
 )
 
 # Configure logging
@@ -292,7 +294,21 @@ async def handle_call_tool(
             results = clean_search_results(raw_data)
             meta = raw_data.get('_meta', {})
 
-            text = str(results)
+            if should_write_to_disk(results):
+                paths = write_results_to_disk(results, query)
+                sample = results[:10]
+                text = (
+                    f"Fetched {meta.get('total_fetched', len(results))} records "
+                    f"(total available: {meta.get('total_available', 'unknown')}, "
+                    f"truncated: {meta.get('truncated', False)}).\n"
+                    f"Full results written to disk:\n"
+                    f"  JSON: {paths['json_path']}\n"
+                    f"  CSV:  {paths['csv_path']}\n\n"
+                    f"First 10 records:\n{sample}"
+                )
+            else:
+                text = str(results)
+
             if meta.get('note'):
                 text += f"\n\nNote: {meta['note']}"
 
