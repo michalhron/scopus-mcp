@@ -234,9 +234,11 @@ def _make_ref_raw(seed_id, ref_ids, title='Seed Paper', year='2021', venue='Jour
     refs = [
         {
             '@id': str(i),
-            'ref-info': {
-                'refd-itemidlist': {'itemid': [{'@idtype': 'SGR', '$': rid}]},
-            },
+            'scopus-id': rid,
+            'title': f'Reference {i}',
+            'sourcetitle': 'Some Journal',
+            'prism:coverDate': '2020-01-01',
+            'author-list': {'author': [{'ce:indexed-name': 'Author A.', '@auid': f'a{i}'}]},
         }
         for i, rid in enumerate(ref_ids)
     ]

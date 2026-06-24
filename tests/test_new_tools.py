@@ -62,24 +62,20 @@ def test_clean_identifiers_empty_on_garbage():
 
 
 def test_clean_references_parses_ref_view():
+    # Fixture uses the real flat Scopus REF view structure (no ref-info nesting)
     raw = {
         "abstracts-retrieval-response": {
             "references": {
                 "reference": [
                     {
                         "@id": "1",
-                        "ref-fulltext": "Daft R.L., Weick K.E., ...",
-                        "ref-info": {
-                            "ref-title": {"ref-titletext": "Toward a model of organizations"},
-                            "ref-sourcetitle": "Academy of Management Review",
-                            "ref-publicationyear": {"@first": "1984"},
-                            "ref-authors": {"author": [{"ce:indexed-name": "Daft R.L."}]},
-                            "refd-itemidlist": {
-                                "itemid": [
-                                    {"@idtype": "SGR", "$": "0021488089"},
-                                    {"@idtype": "DOI", "$": "10.2307/258441"},
-                                ]
-                            },
+                        "title": "Toward a model of organizations",
+                        "sourcetitle": "Academy of Management Review",
+                        "prism:coverDate": "1984-01-01",
+                        "scopus-id": "0021488089",
+                        "ce:doi": "10.2307/258441",
+                        "author-list": {
+                            "author": [{"ce:indexed-name": "Daft R.L.", "@auid": "111"}]
                         },
                     }
                 ]
@@ -95,21 +91,26 @@ def test_clean_references_parses_ref_view():
     assert r["scopus_id"] == "0021488089"
     assert r["doi"] == "10.2307/258441"
     assert r["authors"] == ["Daft R.L."]
+    # At least one usable identifier must be present for network-analysis tools
+    assert r["scopus_id"] is not None or r["doi"] is not None
 
 
 def test_clean_references_handles_single_dict_and_limit():
+    # reference returned as a dict (not list) must still be parsed
     raw = {
         "abstracts-retrieval-response": {
             "references": {
                 "reference": {
                     "@id": "1",
-                    "ref-info": {"ref-title": {"ref-titletext": "Solo ref"}},
+                    "title": "Solo ref",
+                    "scopus-id": "9999999",
                 }
             }
         }
     }
     refs = clean_references(raw)
     assert len(refs) == 1 and refs[0]["title"] == "Solo ref"
+    assert refs[0]["scopus_id"] == "9999999"
 
 
 def test_clean_references_empty_on_garbage():
