@@ -463,6 +463,51 @@ class TestCitationLineageDispatch(unittest.IsolatedAsyncioTestCase):
         assert child_rec['title'] == 'Child Paper'
 
 
+    async def test_forward_query_uses_eid_format(self):
+        """_fetch_next forward must call search_all with REF(2-s2.0-<id>), not bare id."""
+        captured_queries = []
+
+        async def search_side(query, max_results=200, **kw):
+            captured_queries.append(query)
+            return _make_search_raw([{'scopus_id': 'c1', 'cbc': '5'}])
+
+        with tempfile.TemporaryDirectory() as td:
+            await self._dispatch(
+                {'seed_id': '0031512927', 'generations': 1, 'max_per_node': 10},
+                td,
+                lambda sid: _make_abstract_raw(sid),
+                search_side,
+            )
+
+        assert len(captured_queries) == 1, (
+            f"Expected 1 search_all call, got {len(captured_queries)}"
+        )
+        assert captured_queries[0] == 'REF(2-s2.0-0031512927)', (
+            f"Wrong query: {captured_queries[0]!r}"
+        )
+
+    async def test_forward_query_strips_eid_prefix_in_seed(self):
+        """search_all query must not double-prefix when seed_id already has 2-s2.0-."""
+        captured_queries = []
+
+        async def search_side(query, max_results=200, **kw):
+            captured_queries.append(query)
+            return _make_search_raw([])
+
+        with tempfile.TemporaryDirectory() as td:
+            await self._dispatch(
+                {'seed_id': '2-s2.0-0031512927', 'generations': 1},
+                td,
+                lambda sid: _make_abstract_raw('0031512927'),
+                search_side,
+            )
+
+        assert len(captured_queries) == 1
+        assert captured_queries[0] == 'REF(2-s2.0-0031512927)', (
+            f"Double-prefixed query: {captured_queries[0]!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Piece 3 continued: backward direction
 # ---------------------------------------------------------------------------

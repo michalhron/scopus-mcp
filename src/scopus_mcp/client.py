@@ -217,7 +217,9 @@ class ScopusClient:
         Switches to cursor=* deep paging when max_results > 5,000 — the two modes are
         mutually exclusive per Scopus API rules.  Deduplicates across pages by dc:identifier.
         """
-        PAGE_SIZE = 200
+        # 25 is the max count per page for non-institutional API keys.
+        # Institutional keys support up to 200, but 25 is safe for all tiers.
+        PAGE_SIZE = 25
         CURSOR_CEILING = 5000
 
         all_entries: list = []
