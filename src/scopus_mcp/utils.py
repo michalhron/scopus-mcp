@@ -479,8 +479,19 @@ def compute_main_path(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         child = _rec_key(r)
         if not child or child not in node_map:
             continue
+        child_gen = node_map[child].get('generation')
         for parent in (r.get('parents') or []):
             if parent in node_map and parent != child:
+                parent_gen = node_map[parent].get('generation')
+                # Defensive guard: only allow edges between adjacent generations.
+                # Same-generation edges (parent_gen == child_gen) can enter the
+                # parents list via the server-side "already seen" branch when a
+                # gen-N paper is a reference of another gen-N paper (backward walk
+                # bug). Filtering here ensures the DAG used for SPC is clean even
+                # if the lineage data contains same-gen parent entries.
+                if child_gen is not None and parent_gen is not None:
+                    if parent_gen != child_gen - 1:
+                        continue
                 if child not in succ[parent]:
                     succ[parent].append(child)
                 if parent not in pred[child]:

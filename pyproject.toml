@@ -1,6 +1,6 @@
 [project]
 name = "scopus-mcp"
-version = "0.7.1"
+version = "0.7.2"
 description = "A Model Context Protocol server for the Elsevier Scopus API"
 readme = "README.md"
 authors = [

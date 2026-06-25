@@ -737,9 +737,18 @@ async def handle_call_tool(
                     for p in papers:
                         key = p['key']
                         if key in seen:
-                            # Record additional parent without changing generation
+                            # Record an additional parent only when it is from the
+                            # immediately preceding generation (parent_gen == child_gen - 1).
+                            # Skipping same-generation parents prevents within-generation
+                            # edges from entering the lineage DAG and derailing the SPC
+                            # main-path (the backward-walk bug: a gen-1 paper's references
+                            # can include other gen-1 papers, which would otherwise create
+                            # gen1→gen1 edges that the SPC greedy walk traverses sideways).
                             if key in all_papers and parent_id not in all_papers[key]['parents']:
-                                all_papers[key]['parents'].append(parent_id)
+                                child_gen = all_papers[key]['generation']
+                                parent_gen = all_papers.get(parent_id, {}).get('generation')
+                                if parent_gen is not None and parent_gen == child_gen - 1:
+                                    all_papers[key]['parents'].append(parent_id)
                             continue
                         seen.add(key)
                         cbc_str = p.get('cited_by_count')
