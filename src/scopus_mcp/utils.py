@@ -448,17 +448,37 @@ def _rec_key(r: Dict[str, Any]) -> Optional[str]:
 
 
 def compute_main_path(records: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Compute Search Path Count (SPC) traversal weights and the global main path.
+    """Compute canonical Batagelj (2003) SPC weights and the main path.
 
-    Builds a directed graph from the ``parents`` field of each record
-    (edge direction: parent → child, matching generation order).  Uses Kahn's
-    topological sort so cycles are silently skipped rather than crashing.
+    Builds a directed acyclic graph from the ``parents`` field of each record
+    (edge direction: parent → child).  Uses Kahn's topological sort so cycles
+    are silently excluded rather than crashing.
+
+    SPC is computed with canonical pseudo-terminals (Batagelj 2003 / Hummon &
+    Doreian 1989):
+      * A virtual pseudo-source ``s`` is connected to every real source (in-degree 0).
+      * A virtual pseudo-sink ``t`` is connected from every real sink (out-degree 0).
+      * ``n_minus[v]`` = paths from ``s`` to ``v`` (forward DP over topo order).
+      * ``n_plus[v]``  = paths from ``v`` to ``t`` (backward DP).
+      * ``spc(u,v)``   = ``n_minus[u] * n_plus[v]``.
+
+    This ensures correct weighting on multi-source / multi-sink graphs.
+
+    Edge filtering: skip an edge when ``parent_gen == child_gen`` (both generation
+    values known and equal).  Same-generation edges are invalid in a lineage DAG
+    and arise from the backward-walk server bug (a gen-N paper may reference another
+    gen-N paper).  Edges that span MORE than one generation are legitimate — a
+    node's depth depends on its longest/shortest path from the seed, so direct
+    edges can skip generation layers.
 
     Returns a dict:
     {
-        'edges':     [{'source': id, 'target': id, 'spc_weight': int}, …],
-        'main_path': [id, …],   # ordered source → sink
-        'note':      str | None,
+        'edges':            [{'source': id, 'target': id, 'spc_weight': int}, …],
+        'main_path':        [id, …],   # greedy local (start from best source,
+                                       # follow max-weight edge)
+        'global_main_path': [id, …],  # canonical global: max-sum-weight path
+                                       # from any source to any sink via DP
+        'note':             str | None,
     }
     """
     # Build node index
@@ -469,7 +489,7 @@ def compute_main_path(records: List[Dict[str, Any]]) -> Dict[str, Any]:
             node_map[k] = r
 
     if not node_map:
-        return {'edges': [], 'main_path': [], 'note': 'No nodes in lineage.'}
+        return {'edges': [], 'main_path': [], 'global_main_path': [], 'note': 'No nodes in lineage.'}
 
     # Build adjacency (succ / pred maps)
     succ: Dict[str, List[str]] = {k: [] for k in node_map}
@@ -483,14 +503,13 @@ def compute_main_path(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         for parent in (r.get('parents') or []):
             if parent in node_map and parent != child:
                 parent_gen = node_map[parent].get('generation')
-                # Defensive guard: only allow edges between adjacent generations.
-                # Same-generation edges (parent_gen == child_gen) can enter the
-                # parents list via the server-side "already seen" branch when a
-                # gen-N paper is a reference of another gen-N paper (backward walk
-                # bug). Filtering here ensures the DAG used for SPC is clean even
-                # if the lineage data contains same-gen parent entries.
+                # Skip same-generation edges only (not multi-generation-spanning edges).
+                # A gen-N paper's references can include other gen-N papers (backward-walk
+                # bug), producing invalid same-gen edges.  Edges spanning more than one
+                # generation are legitimate (a node's depth is longest/shortest-path depth
+                # from the seed, so direct edges can cross multiple layer boundaries).
                 if child_gen is not None and parent_gen is not None:
-                    if parent_gen != child_gen - 1:
+                    if parent_gen == child_gen:
                         continue
                 if child not in succ[parent]:
                     succ[parent].append(child)
@@ -521,47 +540,101 @@ def compute_main_path(records: List[Dict[str, Any]]) -> Dict[str, Any]:
                 valid_edges.append((u, v))
 
     if not valid_edges:
-        return {'edges': [], 'main_path': [], 'note': 'No edges in lineage graph.'}
+        return {'edges': [], 'main_path': [], 'global_main_path': [], 'note': 'No edges in lineage graph.'}
 
-    # SPC forward pass: spc_f[v] = # paths from any source to v
-    spc_f: Dict[str, int] = {}
+    # Canonical SPC (Batagelj 2003) via pseudo-terminals
+    # ------------------------------------------------------------------
+    # Identify real sources (no in-edges within topo_set) and real sinks
+    real_sources = [k for k in topo if not any(p in topo_set for p in pred[k])]
+    real_sinks   = [k for k in topo if not any(s in topo_set for s in succ[k])]
+
+    # n_minus[v] = # distinct paths from pseudo-source to v
+    # Forward pass: pseudo-source → real sources (each counts 1)
+    n_minus: Dict[str, int] = {}
     for k in topo:
         live_preds = [p for p in pred[k] if p in topo_set]
-        spc_f[k] = 1 if not live_preds else sum(spc_f.get(p, 0) for p in live_preds)
+        if not live_preds:
+            # Real source: connected from pseudo-source by a single edge → 1
+            n_minus[k] = 1
+        else:
+            n_minus[k] = sum(n_minus.get(p, 0) for p in live_preds)
 
-    # SPC backward pass: spc_b[v] = # paths from v to any sink
-    spc_b: Dict[str, int] = {}
+    # n_plus[v] = # distinct paths from v to pseudo-sink
+    # Backward pass: real sinks → pseudo-sink (each counts 1)
+    n_plus: Dict[str, int] = {}
     for k in reversed(topo):
         live_succs = [s for s in succ[k] if s in topo_set]
-        spc_b[k] = 1 if not live_succs else sum(spc_b.get(s, 0) for s in live_succs)
+        if not live_succs:
+            # Real sink: connected to pseudo-sink → 1
+            n_plus[k] = 1
+        else:
+            n_plus[k] = sum(n_plus.get(s, 0) for s in live_succs)
 
-    # Edge SPC weights
+    # Edge SPC weights: spc(u,v) = n_minus[u] * n_plus[v]
     edge_weights = [
-        {'source': u, 'target': v, 'spc_weight': spc_f[u] * spc_b[v]}
+        {'source': u, 'target': v, 'spc_weight': n_minus[u] * n_plus[v]}
         for u, v in valid_edges
     ]
+    spc_map = {(e['source'], e['target']): e['spc_weight'] for e in edge_weights}
 
-    # Greedy main path: start from the source with highest spc_b, follow max-weight edge
-    sources = [k for k in topo if not [p for p in pred[k] if p in topo_set]]
-    if not sources:
-        return {'edges': edge_weights, 'main_path': [], 'note': None}
+    # ------------------------------------------------------------------
+    # Greedy local main path (preserved for backward compatibility):
+    # start from the source with highest n_plus, follow max-weight edge
+    # ------------------------------------------------------------------
+    if not real_sources:
+        greedy_path: List[str] = []
+    else:
+        start = max(real_sources, key=lambda s: n_plus.get(s, 0))
+        greedy_path = [start]
+        visited: set = {start}
+        current = start
+        while True:
+            live_succs = [s for s in succ[current] if s in topo_set]
+            if not live_succs:
+                break
+            best = max(live_succs, key=lambda v: spc_map.get((current, v), 0))
+            if best in visited:
+                break
+            greedy_path.append(best)
+            visited.add(best)
+            current = best
 
-    start = max(sources, key=lambda s: spc_b.get(s, 0))
-    path = [start]
-    visited = {start}
-    current = start
-    while True:
-        live_succs = [s for s in succ[current] if s in topo_set]
-        if not live_succs:
-            break
-        best = max(live_succs, key=lambda v: spc_f[current] * spc_b.get(v, 0))
-        if best in visited:
-            break
-        path.append(best)
-        visited.add(best)
-        current = best
+    # ------------------------------------------------------------------
+    # Canonical global main path:
+    # longest-weighted path (max sum of SPC edge weights) from any real
+    # source to any real sink, computed via DP over topological order.
+    # ------------------------------------------------------------------
+    # dp_val[v] = best total SPC weight of any path ending at v
+    # dp_prev[v] = predecessor of v on that best path
+    dp_val: Dict[str, int] = {k: 0 for k in topo}
+    dp_prev: Dict[str, Any] = {k: None for k in topo}
+    for k in topo:
+        live_preds = [p for p in pred[k] if p in topo_set]
+        for p in live_preds:
+            w = spc_map.get((p, k), 0)
+            candidate = dp_val[p] + w
+            if candidate > dp_val[k]:
+                dp_val[k] = candidate
+                dp_prev[k] = p
 
-    return {'edges': edge_weights, 'main_path': path, 'note': None}
+    # Trace back from the sink with the highest dp_val
+    if not real_sinks:
+        global_path: List[str] = []
+    else:
+        end = max(real_sinks, key=lambda s: dp_val.get(s, 0))
+        global_path = []
+        cur: Any = end
+        while cur is not None:
+            global_path.append(cur)
+            cur = dp_prev[cur]
+        global_path.reverse()
+
+    return {
+        'edges': edge_weights,
+        'main_path': greedy_path,
+        'global_main_path': global_path,
+        'note': None,
+    }
 
 
 # ---------------------------------------------------------------------------
