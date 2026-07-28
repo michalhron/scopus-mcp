@@ -28,13 +28,15 @@ from .utils import (
     _query_slug,
     fetch_oa_fulltext,
     write_fulltext_to_disk,
+    _fetch_abstract_openalex,
+    _fetch_abstract_crossref,
 )
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("scopus-mcp")
 
-SERVER_VERSION = "0.7.6"
+SERVER_VERSION = "0.7.7"
 
 # Initialize Server
 server = Server("scopus-mcp")
@@ -401,10 +403,23 @@ async def handle_call_tool(
             scopus_id = arguments.get("scopus_id")
             if not scopus_id:
                 raise ValueError("scopus_id is required")
-                
+
             raw_data = await client.get_abstract(scopus_id)
             details = clean_abstract_details(raw_data)
-            
+
+            # Fallback: fetch abstract from OpenAlex then Crossref when Scopus withholds it
+            if not details.get('description') and details.get('doi'):
+                doi = details['doi']
+                abstract = await _fetch_abstract_openalex(doi)
+                if abstract:
+                    details['description'] = abstract
+                    details['abstract_source'] = 'openalex'
+                else:
+                    abstract = await _fetch_abstract_crossref(doi)
+                    if abstract:
+                        details['description'] = abstract
+                        details['abstract_source'] = 'crossref'
+
             return [types.TextContent(type="text", text=str(details))]
 
         elif name == "get_author_profile":
