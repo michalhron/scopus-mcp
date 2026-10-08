@@ -5,6 +5,13 @@ are pushed yet (see "Release process" in ROADMAP.md).
 
 ## [Unreleased]
 
+### Added
+- `main-path-basics` skill in the Claude Code plugin: a guided main path
+  analysis from a Scopus query to a drawn map (search path count, global
+  main path, key routes, a year-by-lane plot). Written for the tutorial
+  "Map a research field with Claude". Scripts run on Python 3 with
+  matplotlib, and `main_path.py --selftest` checks the install.
+
 ## [0.24.0] - 2026-09-30
 
 ### Added
