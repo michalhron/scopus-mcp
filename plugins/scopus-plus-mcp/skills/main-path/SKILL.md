@@ -3,7 +3,7 @@ name: main-path
 description: Map the backbone of a research field with main path analysis. Builds a citation network from a Scopus query through the Scopus MCP server, weighs every link by search path count, extracts the main path and key routes, and draws the path by year. Use when someone wants a citation map, the main path of a literature, the backbone of a field, or a reading list built from citation flow.
 ---
 
-# Main path basics
+# Main path
 
 Main path analysis finds the chain of papers that carries the most citation flow through a field
 (Hummon and Doreian 1989). Each link is weighed by its search path count, the number of chains from
