@@ -1,4 +1,4 @@
-# main-path-basics
+# main-path
 
 A Claude skill for main path analysis: query Scopus, build the citation network, find the main path,
 draw it. Made by Michal Hron for the tutorial "Map a research field with Claude".

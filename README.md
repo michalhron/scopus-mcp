@@ -99,9 +99,9 @@ Then make your key available, either in your shell
 Then ask your assistant to run `diagnose_connection`: it checks your key and
 tells you which tools your Scopus access supports.
 
-The Claude Code plugin also installs the **main-path-basics** skill, which
+The Claude Code plugin also installs the **main-path** skill, which
 walks Claude through a main path analysis from a query to a drawn map. For
-Claude Desktop, zip [its folder](plugins/scopus-plus-mcp/skills/main-path-basics)
+Claude Desktop, zip [its folder](plugins/scopus-plus-mcp/skills/main-path)
 and upload it as a skill.
 
 ## Documentation
