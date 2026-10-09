@@ -6,6 +6,8 @@ and then need no Scopus subscription (see [data sources](data-sources.md)).
 
 ## Search and records
 
+<img src="assets/icon-search.svg" width="40" height="40" alt="" align="left"> Guide: [search](search.md)<br clear="left">
+
 ### `search_scopus`
 
 Search for documents in Scopus using a query string.
@@ -90,6 +92,8 @@ Retrieve the full text of a paper via a provider waterfall: (1) ScienceDirect fu
 
 ## Citations
 
+<img src="assets/icon-citations.svg" width="40" height="40" alt="" align="left"> Guide: [search](search.md#citations)<br clear="left">
+
 ### `get_references` · **OpenAlex**
 
 Retrieve the cited-reference list of a document (Backward Citations) via the Abstract Retrieval REF view. Complements get_citing_papers, which returns forward citations. Scopus requires an entitled (subscriber) key; source='openalex' does not.
@@ -112,6 +116,8 @@ Retrieve a list of papers that have cited the specified document (Forward Citati
 | `sort` | string | coverDate | Sort order (e.g., 'coverDate', 'relevancy'). |
 
 ## Networks and lineage
+
+<img src="assets/icon-networks.svg" width="40" height="40" alt="" align="left"> Guide: [networks](networks.md)<br clear="left">
 
 ### `bibliographic_coupling` · **OpenAlex**
 
@@ -214,6 +220,8 @@ Research fronts of a paper set: Louvain communities of its direct-citation netwo
 
 ## Audit
 
+<img src="assets/icon-audit.svg" width="40" height="40" alt="" align="left"> Guide: [audit](audit.md)<br clear="left">
+
 ### `resolve_citers` · **OpenAlex**
 
 All papers citing one or more seed papers, found by several search strategies at once and verified. Runs REF() on each seed plus any extra queries (for example a title-phrase query), merges the hits, then checks each hit's own reference list for the seeds. Reports a per-strategy table (hits, confirmed, unconfirmed, verification failed, confirmed citers the strategy missed). With cross_check (default on when scope is given) it also asks OpenAlex and Semantic Scholar which in-scope papers cite the seeds and lists those Scopus misses or cannot confirm, with Scopus's reference count against the external one, so truncated Scopus reference lists become visible. The Scopus result stays Scopus-only. Long runs may return a job ID: poll job_status, then job_result.
@@ -283,6 +291,8 @@ Retractions, withdrawals, expressions of concern and corrections for a set of pa
 | `corpus_file` | string |  | A corpus file from import_records. |
 
 ## Bibliometrics and bibliography
+
+<img src="assets/icon-bibliometrics.svg" width="40" height="40" alt="" align="left"> Guide: [bibliometrics](bibliometrics.md)<br clear="left">
 
 ### `publication_counts` · **OpenAlex**
 
@@ -362,6 +372,8 @@ Read saved bibliographic exports into one deduplicated corpus file: Scopus CSV, 
 | `resolve` | boolean | True | Look up Scopus IDs for records without one (default true). |
 
 ## Diagnostics and jobs
+
+<img src="assets/icon-diagnostics.svg" width="40" height="40" alt="" align="left"> Guide: [access](access.md)<br clear="left">
 
 ### `diagnose_connection`
 
