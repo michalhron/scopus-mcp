@@ -1,39 +1,30 @@
-# Scopus Plus MCP
-
 <!-- mcp-name: io.github.michalhron/scopus-plus-mcp -->
 
-**The Scopus MCP server that goes further: search, full text, citation networks, journal quality and bibliometrics, for Claude and other AI assistants.**
+<p align="center"><img src="https://raw.githubusercontent.com/michalhron/scopus-plus-mcp/main/docs/assets/banner.svg" alt="Scopus Plus MCP: search, full text, citation networks, journal quality and bibliometrics, for Claude and other AI assistants" width="100%"></p>
 
-[![Tests](https://github.com/michalhron/scopus-plus-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/michalhron/scopus-plus-mcp/actions/workflows/test.yml)
-[![PyPI](https://img.shields.io/pypi/v/scopus-plus-mcp)](https://pypi.org/project/scopus-plus-mcp/)
-![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
-![License: MIT](https://img.shields.io/badge/license-MIT-green)
+<p align="center">
+<a href="https://github.com/michalhron/scopus-plus-mcp/actions/workflows/test.yml"><img src="https://github.com/michalhron/scopus-plus-mcp/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
+<a href="https://pypi.org/project/scopus-plus-mcp/"><img src="https://img.shields.io/pypi/v/scopus-plus-mcp" alt="PyPI"></a>
+<img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+">
+<img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT">
+</p>
 
 Search the literature, trace who cites whom across generations, map research
 fronts and intellectual bases, and pull the counts, metrics and bibliography
 you need, from a conversation. It is an [MCP](https://modelcontextprotocol.io)
 server, so any MCP client can use it: Claude Desktop, Claude Code, Cursor.
 
-- 🕸️ **Citation networks.** Bibliographic coupling, co-citation,
-  multi-generation citation lineages, and the citation network within any
-  set of papers, with SPC/SPLC/SPNP main paths and key routes, RPYS and a
-  historiograph, exported for Pajek, VOSviewer or Gephi.
-- 🧾 **Audited, not just built.** Citer sets verified across search
-  strategies, reference lists checked against Crossref for gaps, and the
-  sentences behind each citation, with their intent, from Semantic Scholar.
-- 🔀 **Two data sources.** Scopus by default; add `source="openalex"` to run
-  the same analyses without a Scopus subscription.
-- 📊 **Bibliometrics.** Where a topic is published and in which quartile per
-  field; journals above a percentile cut-off in chosen categories; publications
-  per year; journal metrics; BibTeX for any list of papers.
-- 🔎 **Full-text search.** Find Elsevier papers that use a term in their body,
-  and see how often and where each one uses it.
-- 🩺 **Honest about access.** One call tells you which tools your current
-  Scopus access supports, and why the rest fail.
-- ✅ **Tested.** 510 test functions, CI on Linux, macOS and Windows, and a
-  live check of every tool against the real APIs.
+## What you get
 
-How it compares with the other Scopus MCP servers and with bibliometrics packages (bibliometrix, pybliometrics, VOSviewer, Pajek, ...): **[comparison](docs/comparison.md)**.
+<table>
+<tr><td width="50%" valign="top"><img src="https://raw.githubusercontent.com/michalhron/scopus-plus-mcp/main/docs/assets/icon-networks.svg" width="48" height="48" alt="" align="left"><b>Citation networks</b><br>Coupling, co-citation, multi-generation lineages and the network within any paper set, with SPC/SPLC/SPNP main paths, key routes, RPYS and a historiograph. <a href="docs/networks.md">More</a></td><td width="50%" valign="top"><img src="https://raw.githubusercontent.com/michalhron/scopus-plus-mcp/main/docs/assets/icon-audit.svg" width="48" height="48" alt="" align="left"><b>Audited, not just built</b><br>Citer sets verified across search strategies, reference lists checked against Crossref, and the sentences behind each citation. <a href="docs/audit.md">More</a></td></tr>
+<tr><td width="50%" valign="top"><img src="https://raw.githubusercontent.com/michalhron/scopus-plus-mcp/main/docs/assets/icon-sources.svg" width="48" height="48" alt="" align="left"><b>Two data sources</b><br>Scopus by default. Add <code>source="openalex"</code> to run the same analyses without a Scopus subscription. <a href="docs/data-sources.md">More</a></td><td width="50%" valign="top"><img src="https://raw.githubusercontent.com/michalhron/scopus-plus-mcp/main/docs/assets/icon-bibliometrics.svg" width="48" height="48" alt="" align="left"><b>Bibliometrics</b><br>Where a topic is published and in which quartile, journals above a percentile cut-off, counts per year, themes over time, BibTeX. <a href="docs/bibliometrics.md">More</a></td></tr>
+<tr><td width="50%" valign="top"><img src="https://raw.githubusercontent.com/michalhron/scopus-plus-mcp/main/docs/assets/icon-fulltext.svg" width="48" height="48" alt="" align="left"><b>Full-text search</b><br>Find Elsevier papers that use a term in their body, and see how often and where each one uses it. <a href="docs/search.md#full-text">More</a></td><td width="50%" valign="top"><img src="https://raw.githubusercontent.com/michalhron/scopus-plus-mcp/main/docs/assets/icon-access.svg" width="48" height="48" alt="" align="left"><b>Honest about access</b><br>One call tells you which tools your Scopus access supports, and why the rest fail. <a href="docs/access.md">More</a></td></tr>
+<tr><td width="50%" valign="top"><img src="https://raw.githubusercontent.com/michalhron/scopus-plus-mcp/main/docs/assets/icon-skill.svg" width="48" height="48" alt="" align="left"><b>Main-path skill</b><br>Walks Claude from a query to a drawn main path map. Ships with the Claude Code plugin. <a href="plugins/scopus-plus-mcp/skills/main-path/README.md">More</a></td><td width="50%" valign="top"><img src="https://raw.githubusercontent.com/michalhron/scopus-plus-mcp/main/docs/assets/icon-tested.svg" width="48" height="48" alt="" align="left"><b>Tested</b><br>510 test functions, CI on Linux, macOS and Windows, and a live check of every tool against the real APIs. <a href="docs/development.md">More</a></td></tr>
+</table>
+
+How it compares with the other Scopus MCP servers and with bibliometrics
+packages (bibliometrix, pybliometrics, VOSviewer, Pajek): [comparison](docs/comparison.md).
 
 ## Ask things like
 
@@ -47,31 +38,45 @@ How it compares with the other Scopus MCP servers and with bibliometrics package
 >
 > *Get SJR and CiteScore for the Basket of Eight, and BibTeX for the papers we just found.*
 
+More, with the tools each one triggers: [prompt examples](docs/examples.md).
+
+## How it works
+
+<p align="center"><img src="https://raw.githubusercontent.com/michalhron/scopus-plus-mcp/main/docs/assets/flow.svg" alt="You ask in your MCP client. scopus-plus-mcp calls Scopus, OpenAlex, Crossref, Semantic Scholar and open-access sources, and writes JSON, CSV, GraphML, Pajek, PNG, HTML and BibTeX files to disk." width="100%"></p>
+
+You ask in plain words and the assistant picks the tools. The server calls
+Scopus with your own key, and Crossref, Semantic Scholar and open-access
+sources where a tool needs them. Results come back as a summary in the reply,
+and the full data goes to files that Pajek, VOSviewer, Gephi or Zotero can
+open. Responses are cached, and long jobs run in the background.
+
 ## Tools
 
-| | |
-| --- | --- |
-| **Search and records** | `search_scopus` · `search_all` · `search_fulltext` · `get_abstract_details` · `resolve_identifier` · `search_authors` · `get_author_profile` · `get_fulltext` |
-| **Citations** | `get_references` · `get_citing_papers` |
-| **Networks** | `bibliographic_coupling` · `co_citation` · `citation_lineage` · `citation_network` · `historiograph` · `rpys` · `research_fronts` |
-| **Audit** | `resolve_citers` · `citation_context` · `path_transmission` · `coding_agreement` · `index_coverage` · `check_retractions` |
-| **Bibliometrics** | `publication_counts` · `topic_landscape` · `thematic_evolution` · `get_journal_metrics` · `find_journals` · `get_bibtex` · `import_records` |
-| **Diagnostics and jobs** | `diagnose_connection` · `get_quota_status` · `get_server_info` · `job_status` · `job_result` |
+<p align="center"><img src="https://raw.githubusercontent.com/michalhron/scopus-plus-mcp/main/docs/assets/tools.svg" alt="35 tools in six families: search, citations, networks, audit, bibliometrics, diagnostics. Fifteen also run on OpenAlex." width="100%"></p>
 
-Parameters and details for each: [tool reference](docs/tools.md).
+| | Family | Tools | Guide |
+| :-: | --- | --- | --- |
+| <img src="https://raw.githubusercontent.com/michalhron/scopus-plus-mcp/main/docs/assets/icon-search.svg" width="28" height="28" alt=""> | Search and records | `search_scopus` · `search_all` · `search_fulltext` · `get_abstract_details` · `resolve_identifier` · `search_authors` · `get_author_profile` · `get_fulltext` | [search](docs/search.md) |
+| <img src="https://raw.githubusercontent.com/michalhron/scopus-plus-mcp/main/docs/assets/icon-citations.svg" width="28" height="28" alt=""> | Citations | `get_references` · `get_citing_papers` | [search](docs/search.md) |
+| <img src="https://raw.githubusercontent.com/michalhron/scopus-plus-mcp/main/docs/assets/icon-networks.svg" width="28" height="28" alt=""> | Networks | `bibliographic_coupling` · `co_citation` · `citation_lineage` · `citation_network` · `historiograph` · `rpys` · `research_fronts` | [networks](docs/networks.md) |
+| <img src="https://raw.githubusercontent.com/michalhron/scopus-plus-mcp/main/docs/assets/icon-audit.svg" width="28" height="28" alt=""> | Audit | `resolve_citers` · `citation_context` · `path_transmission` · `coding_agreement` · `index_coverage` · `check_retractions` | [audit](docs/audit.md) |
+| <img src="https://raw.githubusercontent.com/michalhron/scopus-plus-mcp/main/docs/assets/icon-bibliometrics.svg" width="28" height="28" alt=""> | Bibliometrics | `publication_counts` · `topic_landscape` · `thematic_evolution` · `get_journal_metrics` · `find_journals` · `get_bibtex` · `import_records` | [bibliometrics](docs/bibliometrics.md) |
+| <img src="https://raw.githubusercontent.com/michalhron/scopus-plus-mcp/main/docs/assets/icon-diagnostics.svg" width="28" height="28" alt=""> | Diagnostics and jobs | `diagnose_connection` · `get_quota_status` · `get_server_info` · `job_status` · `job_result` | [access](docs/access.md) |
+
+Every parameter of every tool: [tool reference](docs/tools.md).
 
 ## Install
 
 You need an API key from the [Elsevier Developer Portal](https://dev.elsevier.com/)
 (register with your institutional email). OpenAlex needs no key.
 
-**Claude Desktop** — one click:
+**Claude Desktop**, one click:
 1. Download `scopus-plus-mcp-<version>.mcpb` from the
    [latest release](https://github.com/michalhron/scopus-plus-mcp/releases/latest).
 2. Open it (or drag it into *Settings → Extensions*), click **Install**, and
    paste your API key when asked. Claude stores it securely.
 
-**Claude Code** — two commands:
+**Claude Code**, two commands:
 
 ```bash
 claude plugin marketplace add michalhron/scopus-plus-mcp
@@ -96,7 +101,7 @@ Then make your key available, either in your shell
 }
 ```
 
-Then ask your assistant to run `diagnose_connection`: it checks your key and
+Then ask your assistant to run `diagnose_connection`. It checks your key and
 tells you which tools your Scopus access supports.
 
 The Claude Code plugin also installs the **main-path** skill, which
@@ -106,15 +111,21 @@ and upload it as a skill.
 
 ## Documentation
 
-| | |
-| --- | --- |
-| [Tool reference](docs/tools.md) | Every tool and parameter, generated from the code |
-| [Data sources](docs/data-sources.md) | Scopus vs OpenAlex: when to use which, measured coverage |
-| [Configuration](docs/configuration.md) | All settings; keeping keys in the OS secret store |
-| [Access and troubleshooting](docs/access.md) | Off-campus access, tokens, proxies, reading `diagnose_connection` |
-| [Comparison](docs/comparison.md) | This project vs the other Scopus MCP servers, and vs bibliometrics packages |
-| [Development](docs/development.md) | Tests, live smoke tests, releases |
-| [Prompt examples](docs/examples.md) · [Changelog](CHANGELOG.md) · [Roadmap](ROADMAP.md) | |
+Feature guides:
+
+- [Search, records and full text](docs/search.md): finding papers and authors, identifiers, importing exports, full-text search and retrieval.
+- [Citation networks and main paths](docs/networks.md): coupling, co-citation, lineages, main path analysis, historiograph, RPYS, research fronts.
+- [Audit](docs/audit.md): verified citer sets, reference-list completeness, citation contexts, retractions.
+- [Bibliometrics and bibliography](docs/bibliometrics.md): counts per year, topic landscape, journal cut-offs and metrics, thematic evolution, BibTeX.
+
+Reference and setup:
+
+- [Tool reference](docs/tools.md): every tool and parameter, generated from the code.
+- [Data sources](docs/data-sources.md): Scopus vs OpenAlex, when to use which, measured coverage.
+- [Configuration](docs/configuration.md): all settings, and keeping keys in the OS secret store.
+- [Access and troubleshooting](docs/access.md): off-campus access, tokens, proxies, reading `diagnose_connection`.
+- [Comparison](docs/comparison.md): this project vs the other Scopus MCP servers, and vs bibliometrics packages.
+- [Prompt examples](docs/examples.md), [development](docs/development.md), [changelog](CHANGELOG.md), [roadmap](ROADMAP.md).
 
 ## Origins
 

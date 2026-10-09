@@ -17,3 +17,6 @@ mcp-publisher.exe
 server.json
 .mcpregistry_github_token
 .mcpregistry_registry_token
+
+# Fonts downloaded by docs/assets/make_assets.py
+docs/assets/.fonts/

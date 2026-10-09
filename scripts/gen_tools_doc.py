@@ -32,6 +32,16 @@ GROUPS = [
                               'job_status', 'job_result']),
 ]
 
+# Icon (docs/assets/icon-*.svg) and feature guide for each group.
+GUIDES = {
+    'Search and records': ('search', 'search.md'),
+    'Citations': ('citations', 'search.md#citations'),
+    'Networks and lineage': ('networks', 'networks.md'),
+    'Audit': ('audit', 'audit.md'),
+    'Bibliometrics and bibliography': ('bibliometrics', 'bibliometrics.md'),
+    'Diagnostics and jobs': ('diagnostics', 'access.md'),
+}
+
 HEADER = """# Tool reference
 
 Generated from the server's tool definitions by `scripts/gen_tools_doc.py`;
@@ -60,7 +70,9 @@ def render(tools) -> str:
         raise SystemExit(f"Tools missing from GROUPS: {missing}")
     out = [HEADER]
     for title, names in GROUPS:
-        out.append(f"\n## {title}\n")
+        icon, guide = GUIDES[title]
+        out.append(f"\n## {title}\n\n<img src=\"assets/icon-{icon}.svg\" width=\"40\" height=\"40\" "
+                   f"alt=\"\" align=\"left\"> Guide: [{guide.split('#')[0][:-3]}]({guide})<br clear=\"left\">\n")
         for name in names:
             tool = by_name[name]
             props = tool.inputSchema.get('properties', {})
